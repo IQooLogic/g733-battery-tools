@@ -29,11 +29,11 @@ Enter your sudo password when prompted. The script writes:
 /etc/udev/rules.d/99-logitech-g733-hidraw.rules
 ```
 
-The installer writes a direct owner rule for the account that runs it (currently
-`milos`): `OWNER="milos", MODE="0600"`. This is intentionally limited to the
-G733's `046d:0b1f` HID interface and gives access to that account only. It is
-used instead of `TAG+="uaccess"` because this KDE/logind setup did not apply a
-user ACL to the hidraw device.
+The installer writes a direct owner rule naming the account that runs it, as
+`OWNER="<your user>", MODE="0600"`. This is intentionally limited to the G733's
+`046d:0b1f` HID interface and grants access to that one account. It is used
+instead of `TAG+="uaccess"` because some KDE/logind setups do not apply a user
+ACL to hidraw devices.
 
 The installer then re-triggers `hidraw` events, so a receiver that is already
 connected picks up the rule straight away. If the receiver was not connected at
@@ -48,7 +48,7 @@ First inspect the HID devices and the ACL on the G733 node:
 ./check-hidraw.sh
 ```
 
-For the detected G733, `getfacl` should show `owner: milos` and
+For the detected G733, `getfacl` should show your username as `owner:` and
 `user::rw-` (the exact node number can change after reconnecting). Then retrieve
 one battery reading:
 
@@ -82,7 +82,7 @@ the one-shot query once per minute instead of retaining a long-running command.
 After `./battery-status.sh` reports a successful level, start the monitor:
 
 ```bash
-cd ~/WORK/g733-battery-tools/tray
+cd tray
 ./start.sh
 ```
 
@@ -111,6 +111,13 @@ See [`tray/README.md`](tray/README.md) for options and troubleshooting.
 
 ```bash
 HEADSETCONTROL=/opt/headsetcontrol/headsetcontrol ./battery-status.sh
+```
+
+The value may also be a command name found on `PATH`, which is how the tray
+monitor reads it too:
+
+```bash
+HEADSETCONTROL=headsetcontrol ./battery-status.sh
 ```
 
 `TIMEOUT_SECONDS=20` changes the one-shot command timeout.

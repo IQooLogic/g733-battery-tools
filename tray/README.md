@@ -15,12 +15,13 @@ cd ..
 ```
 
 It must show `"status": "success"` and a battery level before starting this
-app. PyQt6 is already installed on this machine (`python-pyqt6`).
+app. PyQt6 is also required; on Arch it is packaged as `python-pyqt6`.
 
 ## Start it now
 
+From this directory:
+
 ```bash
-cd ~/WORK/g733-battery-tools/tray
 ./start.sh
 ```
 
@@ -84,8 +85,9 @@ The app never invokes HeadsetControl with `sudo`.
 
 ## Tests
 
+From this directory:
+
 ```bash
-cd ~/WORK/g733-battery-tools/tray
 python3 test_tray.py
 ```
 
