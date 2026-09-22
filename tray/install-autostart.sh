@@ -12,7 +12,8 @@ cat >"$desktop_file" <<EOF
 Type=Application
 Name=G733 Battery
 Comment=Show Logitech G733 battery level in the system tray
-Exec=$script_dir/start.sh
+Exec="$script_dir/start.sh"
+Icon=audio-headset
 Terminal=false
 X-GNOME-Autostart-enabled=true
 EOF
