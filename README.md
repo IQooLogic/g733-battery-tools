@@ -59,9 +59,10 @@ one battery reading:
 Successful output is JSON whose `devices[0].battery.level` is between `0` and
 `100`. For example, a battery level of `73` means 73%.
 
-If it still contains `"level": -1` and `"Could not open device"`, make sure
-you reconnected the receiver after installing the rule, verify that the
-receiver appears in `./check-hidraw.sh`, then log out/in or reboot and retry.
+If it still contains `"level": -1` and `"Could not open device"`, verify that
+the receiver appears in `./check-hidraw.sh`, then unplug and reconnect it so
+udev applies the rule on the device event. If that does not help, log out/in or
+reboot and retry.
 Do not run HeadsetControl with `sudo`; the rule is intended to make normal-user
 access work.
 
@@ -85,9 +86,10 @@ cd ~/WORK/g733-battery-tools/tray
 ./start.sh
 ```
 
-The tray icon displays the percentage; hover it for the percentage and estimated
-remaining time. If Plasma hides it, open the system-tray settings and set
-**G733 Battery** to **Always shown**.
+The tray icon displays the percentage, and turns blue while the headset charges.
+Hover it for the percentage and the estimated time remaining or until full. If
+Plasma hides it, open the system-tray settings and set **G733 Battery** to
+**Always shown**.
 
 To make it start automatically whenever you log in to KDE:
 

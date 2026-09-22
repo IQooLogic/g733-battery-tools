@@ -1,8 +1,9 @@
 # G733 KDE tray monitor
 
 A small PyQt6 application that displays the Logitech G733 battery in the KDE
-Plasma system tray. Its icon contains the current numeric percentage, and its
-tooltip includes the percentage and, when reported, estimated time remaining.
+Plasma system tray. Its icon contains the current percentage, coloured by charge
+level and blue while charging, and its tooltip adds the estimated time remaining
+or until full when HeadsetControl reports one.
 
 ## Prerequisite
 
@@ -46,6 +47,12 @@ runs it every two minutes:
 
 ```bash
 ./start.sh --interval 120
+```
+
+The `POLL_SECONDS` environment variable does the same thing, and the option wins
+if you use both:
+
+```bash
 POLL_SECONDS=120 ./start.sh
 ```
 
