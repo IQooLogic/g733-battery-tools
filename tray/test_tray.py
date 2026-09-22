@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import logging
 import os
 import stat
@@ -28,10 +29,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from PyQt6.QtCore import QEventLoop, QSize  # noqa: E402
-from PyQt6.QtWidgets import QApplication  # noqa: E402
+from PyQt6.QtCore import QEventLoop, QSize
+from PyQt6.QtWidgets import QApplication
 
-import g733_battery_tray as tray  # noqa: E402
+import g733_battery_tray as tray
 
 APP = QApplication.instance() or QApplication([])
 
@@ -46,8 +47,9 @@ FILL_SAMPLE = (10, 32)
 REQUEST_TIMEOUT_SECONDS = 15
 
 
-def device_json(battery: str) -> str:
-    return '{"device_count":1,"devices":[{"status":"success","battery":%s}]}' % battery
+def device_json(battery: dict[str, object]) -> str:
+    """Wrap one battery object in the envelope HeadsetControl prints."""
+    return json.dumps({"device_count": 1, "devices": [{"status": "success", "battery": battery}]})
 
 
 def read_once(command: str) -> str:
@@ -89,30 +91,30 @@ class StubCommandMixin:
 class BatteryStateTests(StubCommandMixin, unittest.TestCase):
     def test_discharging_shows_level_and_remaining_time(self) -> None:
         text = self.read_payload(
-            device_json('{"status":"BATTERY_AVAILABLE","level":39,"time_to_empty_min":351}')
+            device_json({"status": "BATTERY_AVAILABLE", "level": 39, "time_to_empty_min": 351})
         )
         self.assertEqual(text, "G733 battery: 39% · about 5h 51m left")
 
     def test_charging_with_level_is_not_an_error(self) -> None:
         # Regression: BATTERY_CHARGING used to render as "battery unavailable".
         text = self.read_payload(
-            device_json('{"status":"BATTERY_CHARGING","level":62,"time_to_full_min":95}')
+            device_json({"status": "BATTERY_CHARGING", "level": 62, "time_to_full_min": 95})
         )
         self.assertEqual(text, "G733 battery: charging 62% · about 1h 35m until full")
 
     def test_charging_without_a_usable_level(self) -> None:
-        text = self.read_payload(device_json('{"status":"BATTERY_CHARGING","level":-1}'))
+        text = self.read_payload(device_json({"status": "BATTERY_CHARGING", "level": -1}))
         self.assertEqual(text, "G733 battery: charging")
 
     def test_unknown_remaining_time_is_omitted(self) -> None:
         # Regression: -1 minutes used to render as "about -1h 59m left".
         text = self.read_payload(
-            device_json('{"status":"BATTERY_AVAILABLE","level":44,"time_to_empty_min":-1}')
+            device_json({"status": "BATTERY_AVAILABLE", "level": 44, "time_to_empty_min": -1})
         )
         self.assertEqual(text, "G733 battery: 44%")
 
     def test_headset_off_reports_the_status(self) -> None:
-        text = self.read_payload(device_json('{"status":"BATTERY_UNAVAILABLE","level":-1}'))
+        text = self.read_payload(device_json({"status": "BATTERY_UNAVAILABLE", "level": -1}))
         self.assertIn("BATTERY_UNAVAILABLE", text)
         self.assertTrue(text.startswith("G733 battery unavailable:"))
 
@@ -126,16 +128,16 @@ class BatteryStateTests(StubCommandMixin, unittest.TestCase):
 
 
 class CommandResolutionTests(StubCommandMixin, unittest.TestCase):
-    PAYLOAD = device_json('{"status":"BATTERY_AVAILABLE","level":77,"time_to_empty_min":420}')
+    PAYLOAD = device_json({"status": "BATTERY_AVAILABLE", "level": 77, "time_to_empty_min": 420})
 
     def test_absolute_path(self) -> None:
-        self.assertEqual(
-            read_once(self.stub(self.PAYLOAD)), "G733 battery: 77% · about 7h 0m left"
-        )
+        self.assertEqual(read_once(self.stub(self.PAYLOAD)), "G733 battery: 77% · about 7h 0m left")
 
     def test_bare_name_is_looked_up_on_path(self) -> None:
         self.stub(self.PAYLOAD)
-        with mock.patch.dict(os.environ, {"PATH": self._tmp.name + os.pathsep + os.environ["PATH"]}):
+        with mock.patch.dict(
+            os.environ, {"PATH": self._tmp.name + os.pathsep + os.environ["PATH"]}
+        ):
             text = read_once("headsetcontrol")
         self.assertEqual(text, "G733 battery: 77% · about 7h 0m left")
 
@@ -155,7 +157,7 @@ class CommandResolutionTests(StubCommandMixin, unittest.TestCase):
 
     def test_the_first_usable_candidate_wins(self) -> None:
         preferred = self.stub(self.PAYLOAD, name="preferred")
-        other = self.stub(device_json('{"status":"BATTERY_AVAILABLE","level":5}'), name="other")
+        other = self.stub(device_json({"status": "BATTERY_AVAILABLE", "level": 5}), name="other")
         self.assertEqual(tray.resolve_command((preferred, other)), preferred)
 
     def test_error_suggests_the_package(self) -> None:
@@ -173,7 +175,7 @@ class CommandResolutionTests(StubCommandMixin, unittest.TestCase):
 
 class NotificationTests(StubCommandMixin, unittest.TestCase):
     def monitor(self) -> tray.G733Tray:
-        monitor = tray.G733Tray((self.stub(device_json("{}")),), 3600)
+        monitor = tray.G733Tray((self.stub(device_json({})),), 3600)
         self.addCleanup(monitor.poll_timer.stop)
         return monitor
 
@@ -194,7 +196,7 @@ class ErrorLoggingTests(StubCommandMixin, unittest.TestCase):
     """Errors must reach stderr; an autostarted monitor has no other channel."""
 
     def monitor(self) -> tray.G733Tray:
-        monitor = tray.G733Tray((self.stub(device_json("{}")),), 3600)
+        monitor = tray.G733Tray((self.stub(device_json({})),), 3600)
         self.addCleanup(monitor.poll_timer.stop)
         return monitor
 
@@ -250,9 +252,12 @@ class ArgumentTests(unittest.TestCase):
         """Parse one command line, capturing whatever it printed as self.output."""
         stdout, stderr = io.StringIO(), io.StringIO()
         try:
-            with mock.patch.object(sys, "argv", ["g733_battery_tray.py", *argv]), \
-                 mock.patch.dict(os.environ, env, clear=False), \
-                 contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            with (
+                mock.patch.object(sys, "argv", ["g733_battery_tray.py", *argv]),
+                mock.patch.dict(os.environ, env, clear=False),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
                 return tray.parse_arguments()
         finally:
             self.output = stdout.getvalue() + stderr.getvalue()

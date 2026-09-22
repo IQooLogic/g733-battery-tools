@@ -1,0 +1,22 @@
+[tool.ruff]
+# The existing code is written to this width; the ruff default of 88 would
+# explode several signatures onto multiple lines for no gain.
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # import sorting
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "SIM",  # simplifications
+    "RUF",  # ruff-specific
+]
+
+[tool.ruff.lint.isort]
+# test_tray.py imports the module beside it; without this ruff sorts it in with
+# the third-party PyQt6 imports.
+known-first-party = ["g733_battery_tray"]

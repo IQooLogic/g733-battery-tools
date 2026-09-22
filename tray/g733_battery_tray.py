@@ -11,7 +11,7 @@ import signal
 import sys
 from pathlib import Path
 
-from PyQt6.QtCore import QProcess, QTimer, Qt
+from PyQt6.QtCore import QProcess, Qt, QTimer
 from PyQt6.QtGui import (
     QAction,
     QColor,
@@ -309,7 +309,10 @@ class G733Tray:
         self.status_action.setText(message)
 
     def on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
-        if reason in {QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick}:
+        if reason in {
+            QSystemTrayIcon.ActivationReason.Trigger,
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+        }:
             self.refresh()
 
     def quit(self) -> None:

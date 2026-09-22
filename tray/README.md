@@ -105,6 +105,15 @@ real monitor against stub commands that print recorded HeadsetControl output,
 covering the battery states, the command lookup, the icon colours, the error
 logging and the command line.
 
+Linting and formatting use [ruff](https://docs.astral.sh/ruff/), configured in
+the repository's `pyproject.toml`. It is optional to run, and not needed to use
+the monitor:
+
+```bash
+ruff check .      # lint
+ruff format .     # format in place
+```
+
 ## Start automatically with KDE
 
 ```bash
