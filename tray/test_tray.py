@@ -398,8 +398,11 @@ class LightsMemoryTests(StubCommandMixin, unittest.TestCase):
         self.settle(monitor)
         # Sooner than the hour-long interval it was counting down, but not
         # immediately: the headset reports no battery just after the write.
-        self.assertGreater(monitor.poll_timer.remainingTime(), 0)
-        self.assertLessEqual(monitor.poll_timer.remainingTime(), tray.LIGHTS_SETTLE_MS)
+        remaining = monitor.poll_timer.remainingTime()
+        self.assertGreater(remaining, 0)
+        # Not exactly the window: Qt's coarse timers round a deadline up.
+        self.assertLess(remaining, tray.LIGHTS_SETTLE_MS * 1.5)
+        self.assertLess(remaining, monitor.interval_ms)
 
     def test_a_failed_restore_is_logged_but_not_notified(self) -> None:
         # The headset is commonly off when an autostarted monitor begins; that
@@ -472,6 +475,52 @@ class NotificationTests(StubCommandMixin, unittest.TestCase):
         monitor = self.monitor()
         monitor.show_level(15, {}, is_charging=True)
         self.assertFalse(monitor.low_battery_notified)
+
+    def test_a_full_charge_is_announced_once(self) -> None:
+        monitor = self.monitor()
+        with mock.patch.object(monitor.tray, "showMessage") as notified:
+            monitor.show_level(100, {}, is_charging=True)
+            monitor.show_level(100, {}, is_charging=True)
+        notified.assert_called_once()
+        self.assertIn("fully charged", notified.call_args.args[0])
+
+    def test_a_full_battery_that_is_not_charging_is_not_announced(self) -> None:
+        # A headset that simply reads 100% was not just charged to it.
+        monitor = self.monitor()
+        with mock.patch.object(monitor.tray, "showMessage") as notified:
+            monitor.show_level(100, {}, is_charging=False)
+        notified.assert_not_called()
+
+    def test_coming_off_the_cable_re_arms_the_announcement(self) -> None:
+        monitor = self.monitor()
+        monitor.show_level(100, {}, is_charging=True)
+        monitor.show_level(100, {}, is_charging=False)
+        self.assertFalse(monitor.full_battery_notified)
+        with mock.patch.object(monitor.tray, "showMessage") as notified:
+            monitor.show_level(100, {}, is_charging=True)
+        notified.assert_called_once()
+
+    def test_a_drop_below_full_re_arms_the_announcement(self) -> None:
+        monitor = self.monitor()
+        monitor.show_level(100, {}, is_charging=True)
+        monitor.show_level(94, {}, is_charging=True)
+        self.assertFalse(monitor.full_battery_notified)
+
+    def test_staying_just_below_full_keeps_the_announcement_latched(self) -> None:
+        # A reading that wobbles between 100 and 99 must not announce twice.
+        monitor = self.monitor()
+        monitor.show_level(100, {}, is_charging=True)
+        with mock.patch.object(monitor.tray, "showMessage") as notified:
+            monitor.show_level(99, {}, is_charging=True)
+            monitor.show_level(100, {}, is_charging=True)
+        notified.assert_not_called()
+
+    def test_charging_without_a_level_is_not_treated_as_full(self) -> None:
+        monitor = self.monitor()
+        with mock.patch.object(monitor.tray, "showMessage") as notified:
+            monitor.show_level(None, {}, is_charging=True)
+        notified.assert_not_called()
+        self.assertFalse(monitor.full_battery_notified)
 
 
 class ErrorLoggingTests(StubCommandMixin, unittest.TestCase):

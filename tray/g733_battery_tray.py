@@ -35,6 +35,11 @@ PACKAGED_COMMAND = "headsetcontrol"
 DEFAULT_COMMANDS = (str(DEFAULT_APPIMAGE), PACKAGED_COMMAND)
 LOW_BATTERY_PERCENT = 20
 LOW_BATTERY_RESET_PERCENT = 25
+# HeadsetControl has no "full" status, so a full charge is a charging reading
+# that has reached 100%. The reset level re-arms the notification only after a
+# real discharge, so a headset left on the cable is announced once.
+FULL_BATTERY_PERCENT = 100
+FULL_BATTERY_RESET_PERCENT = 95
 MINIMUM_INTERVAL_SECONDS = 5
 REQUEST_TIMEOUT_MS = 15_000
 # Measured on the G733: for about two seconds after a lights write the headset
@@ -250,6 +255,7 @@ class G733Tray:
         # reported as a fault the user should act on.
         self.quitting = False
         self.low_battery_notified = False
+        self.full_battery_notified = False
         self.last_error: str | None = None
         self.status_text = "G733 battery: waiting for first reading"
         # The last lights fault, kept until a lights request succeeds, so the
@@ -540,6 +546,19 @@ class G733Tray:
             self.low_battery_notified = True
         elif level >= LOW_BATTERY_RESET_PERCENT:
             self.low_battery_notified = False
+
+        if is_charging and level is not None and level >= FULL_BATTERY_PERCENT:
+            if not self.full_battery_notified:
+                self.tray.showMessage(
+                    "G733 fully charged",
+                    "Battery is at 100%. The headset can come off the cable.",
+                    QSystemTrayIcon.MessageIcon.Information,
+                )
+                self.full_battery_notified = True
+        elif not is_charging or (level is not None and level <= FULL_BATTERY_RESET_PERCENT):
+            # Re-armed once the headset leaves the cable or drops below full, so
+            # the next full charge is announced and a steady 100% is not.
+            self.full_battery_notified = False
 
     def show_error(self, message: str) -> None:
         # Deduplicated because a persistent fault would otherwise write one line

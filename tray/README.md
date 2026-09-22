@@ -149,6 +149,10 @@ installing it. To stop automatic startup:
 - A low-battery notification is sent once at 20% or below; it resets after the
   charge rises to at least 25%, or as soon as charging starts. No low-battery
   notification is sent while the headset charges.
+- A "fully charged" notification is sent once when a charging reading reaches
+  100%. HeadsetControl reports no "full" status, so that reading is what full
+  means here. It is sent again only after the headset comes off the cable or
+  drops below 95%, so a headset left charging overnight is announced once.
 - A grey `!` means something went wrong: the headset is off or out of range, or
   the command failed. Hover the icon for what happened. The `!` is replaced by
   the battery reading as soon as one succeeds again.
