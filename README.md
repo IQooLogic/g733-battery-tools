@@ -35,8 +35,10 @@ G733's `046d:0b1f` HID interface and gives access to that account only. It is
 used instead of `TAG+="uaccess"` because this KDE/logind setup did not apply a
 user ACL to the hidraw device.
 
-**Unplug and reconnect the G733 receiver after installation** (or reboot).
-This is required because udev applies rules when it receives device events.
+The installer then re-triggers `hidraw` events, so a receiver that is already
+connected picks up the rule straight away. If the receiver was not connected at
+that moment, plug it in (or reboot); udev applies rules when it receives device
+events.
 
 ## Verify access and battery level
 

@@ -16,6 +16,13 @@ echo "Installing $rule_path for user $target_user"
 printf '%s\n' "$rule" | sudo tee "$rule_path" >/dev/null
 sudo udevadm control --reload-rules
 
+# Re-apply the rule to a receiver that is already connected, so the usual case
+# needs no replug. This does nothing when the receiver is absent, which is why
+# the replug instruction stays below as a fallback.
+sudo udevadm trigger --subsystem-match=hidraw --action=add
+sudo udevadm settle
+
 echo
-printf '%s\n' 'Rule installed. Unplug and reconnect the G733 USB receiver (or reboot).'
-printf '%s\n' 'Then run ./check-hidraw.sh and ./battery-status.sh.'
+printf '%s\n' 'Rule installed and applied to any connected G733.'
+printf '%s\n' 'Run ./check-hidraw.sh and ./battery-status.sh to confirm.'
+printf '%s\n' 'If the battery still reads -1, unplug and reconnect the receiver (or reboot).'
