@@ -66,7 +66,8 @@ headsetcontrol            (any command of that name on PATH)
 
 The AppImage comes first because it is usually the newer build. The second entry
 means a distribution package works with no configuration; install one with, for
-example, `sudo pacman -S headsetcontrol`.
+example, `sudo pacman -S headsetcontrol`. Both come from
+[HeadsetControl][hc], whose [releases][hc-releases] page publishes the AppImage.
 
 Override both when starting the monitor with either an option or environment
 variable:
@@ -149,3 +150,6 @@ installing it. To stop automatic startup:
   once, and recovery is logged when a reading succeeds again.
 - Each command request has a 15-second timeout, and failures are retried on the
   next interval.
+
+[hc]: https://github.com/Sapd/HeadsetControl
+[hc-releases]: https://github.com/Sapd/HeadsetControl/releases

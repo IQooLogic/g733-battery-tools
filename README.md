@@ -1,14 +1,17 @@
 # Logitech G733 HID access tools
 
 These scripts grant the local KDE desktop user access to the G733's HID
-interface, verify that `headsetcontrol` can read its battery, and include a KDE
-system-tray monitor in [`tray/`](tray/README.md).
+interface, verify that [HeadsetControl][hc] can read its battery, and include a
+KDE system-tray monitor in [`tray/`](tray/README.md). HeadsetControl does the
+actual talking to the headset; this repository only sets up access to it and
+presents the reading.
 
 ## Prerequisites
 
 - The G733 USB receiver is connected and the headset is on.
-- HeadsetControl is available. Either install your distribution's package
-  (`sudo pacman -S headsetcontrol` on Arch), or keep the AppImage at
+- [HeadsetControl][hc] is available. Either install your distribution's
+  package (`sudo pacman -S headsetcontrol` on Arch), or keep an AppImage from
+  its [releases][hc-releases] at
   `~/Downloads/headsetcontrol-x86_64.AppImage`. The scripts try the AppImage
   first and fall back to a `headsetcontrol` command on `PATH`, so an installed
   package needs no configuration. `HEADSETCONTROL` overrides both.
@@ -142,3 +145,6 @@ applies when you plug it in.
 ## License
 
 MIT. See [`LICENSE`](LICENSE).
+
+[hc]: https://github.com/Sapd/HeadsetControl
+[hc-releases]: https://github.com/Sapd/HeadsetControl/releases
