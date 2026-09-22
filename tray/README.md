@@ -3,7 +3,9 @@
 A small PyQt6 application that displays the Logitech G733 battery in the KDE
 Plasma system tray. Its icon contains the current percentage, coloured by charge
 level and blue while charging, and its tooltip adds the estimated time remaining
-or until full when HeadsetControl reports one.
+or until full when HeadsetControl reports one. Its context menu can also switch
+the headset lights on or off, and applies the last state you chose each time it
+starts.
 
 ## Prerequisite
 
@@ -27,7 +29,8 @@ From this directory:
 
 The tray icon starts as `?`, then updates after its first reading. The number
 inside it is the battery percentage. Left-click or double-click the icon for an
-immediate refresh; right-click for Refresh now and Quit.
+immediate refresh; right-click for Refresh now, Turn lights on, Turn lights off
+and Quit.
 
 `./start.sh` runs the monitor in the foreground, so its terminal stays occupied
 until you use the tray's **Quit** action. Quit returns you to the shell without
@@ -103,8 +106,9 @@ python3 test_tray.py
 The suite needs only the standard library and PyQt6, and runs headless with the
 Qt `offscreen` platform, so it needs no display and no headset. It drives the
 real monitor against stub commands that print recorded HeadsetControl output,
-covering the battery states, the command lookup, the icon colours, the error
-logging and the command line.
+covering the battery states, the command lookup, the lights items and the state
+they remember, the icon colours and the charging bolt, the error reporting and
+the command line.
 
 Linting and formatting use [ruff](https://docs.astral.sh/ruff/), configured in
 the repository's `pyproject.toml`. It is optional to run, and not needed to use
@@ -137,17 +141,46 @@ installing it. To stop automatic startup:
 ## Behaviour
 
 - Green: above 50%; amber: 21–50%; red: 20% or below.
-- Blue means the headset is charging. The icon keeps the percentage when
-  HeadsetControl reports one and shows a lightning bolt when it does not. The
-  tooltip then gives the estimated time until full.
+- Blue and a lightning bolt mean the headset is charging. The icon keeps the
+  percentage when HeadsetControl reports one and draws the bolt beside it; when
+  no percentage is reported, the bolt fills the icon. The bolt is there so
+  charging does not depend on telling blue from green. The tooltip then gives
+  the estimated time until full.
 - A low-battery notification is sent once at 20% or below; it resets after the
   charge rises to at least 25%, or as soon as charging starts. No low-battery
   notification is sent while the headset charges.
-- A grey `?` means the headset is off or out of range, the command failed, or no
-  reading has completed. Hover the icon for the error detail.
+- A grey `!` means something went wrong: the headset is off or out of range, or
+  the command failed. Hover the icon for what happened. The `!` is replaced by
+  the battery reading as soon as one succeeds again.
+- A grey `?` means no reading has completed yet, which is the state the monitor
+  starts in.
 - Errors are also written to standard error, so an autostarted monitor can be
   diagnosed by redirecting its output to a log file. A repeated error is logged
   once, and recovery is logged when a reading succeeds again.
+- **Turn lights on** and **Turn lights off** run `headsetcontrol -l 1` and
+  `headsetcontrol -l 0`. Both items are disabled while a request runs, and the
+  request uses its own process, so it does not cancel the current battery
+  reading.
+- The state you choose is remembered and ticked in the menu. It is applied again
+  each time the monitor starts, which restores it after the headset has been
+  powered off and on. Only a request that succeeded is remembered.
+- The remembered state is stored in:
+
+  ```text
+  ~/.config/g733-battery-tray/state.json
+  ```
+
+  `XDG_CONFIG_HOME` is honoured. Delete the file to stop applying a state at
+  startup. An unreadable or invalid file is logged and ignored, not repaired.
+- For about two seconds after a lights change the headset answers battery
+  requests with `BATTERY_UNAVAILABLE`. The monitor therefore holds the next
+  reading back until that window has passed, and takes it then rather than
+  waiting a full interval, so a lights change does not show a false `?`.
+- A failed lights request is logged, notified, and then kept in the tooltip and
+  under the lights items until a lights request succeeds. It is deliberately not
+  put on the icon: the icon reports the battery, and that reading is still
+  valid. The restore at startup is not notified — the headset is commonly off
+  when an autostarted monitor begins, and you pressed nothing to cause it.
 - Each command request has a 15-second timeout, and failures are retried on the
   next interval.
 
