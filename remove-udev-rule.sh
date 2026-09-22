@@ -7,7 +7,15 @@ rule_path=/etc/udev/rules.d/99-logitech-g733-hidraw.rules
 if [[ -e "$rule_path" ]]; then
   sudo rm -- "$rule_path"
   sudo udevadm control --reload-rules
-  echo "Removed $rule_path. Reconnect the receiver to apply the change."
+
+  # Re-apply the remaining rules to a connected receiver, so the node returns to
+  # root ownership now rather than at the next device event. Without this the
+  # account keeps access to an already-present device until it is replugged.
+  sudo udevadm trigger --subsystem-match=hidraw --action=add
+  sudo udevadm settle
+
+  echo "Removed $rule_path and reset access on any connected G733."
+  echo 'If the receiver was not connected, the change applies when you plug it in.'
 else
   echo "No rule found at $rule_path; nothing to remove."
 fi

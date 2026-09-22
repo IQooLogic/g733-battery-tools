@@ -135,7 +135,9 @@ unset to get the AppImage-then-package order. The shared resolution lives in
 ./remove-udev-rule.sh
 ```
 
-Reconnect the receiver after removal to apply it.
+Like the installer, this re-triggers `hidraw` events, so a connected receiver
+returns to root ownership immediately. If it was not connected, the change
+applies when you plug it in.
 
 ## License
 
