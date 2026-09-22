@@ -24,7 +24,12 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
-DEFAULT_COMMAND = Path.home() / "Downloads" / "headsetcontrol-x86_64.AppImage"
+DEFAULT_APPIMAGE = Path.home() / "Downloads" / "headsetcontrol-x86_64.AppImage"
+# Distributions package HeadsetControl as "headsetcontrol". The AppImage is
+# tried first because it is usually the newer build; the package is the
+# fallback, so an installed package works with no configuration.
+PACKAGED_COMMAND = "headsetcontrol"
+DEFAULT_COMMANDS = (str(DEFAULT_APPIMAGE), PACKAGED_COMMAND)
 LOW_BATTERY_PERCENT = 20
 LOW_BATTERY_RESET_PERCENT = 25
 MINIMUM_INTERVAL_SECONDS = 5
@@ -34,7 +39,12 @@ MINIMUM_INTERVAL_SECONDS = 5
 STATUS_AVAILABLE = "BATTERY_AVAILABLE"
 STATUS_CHARGING = "BATTERY_CHARGING"
 
-USAGE = "Usage: g733_battery_tray.py [--command PATH] [--interval SECONDS]"
+USAGE = f"""Usage: g733_battery_tray.py [--command PATH] [--interval SECONDS]
+
+PATH may be a path or a command name found on PATH. Without --command or the
+HEADSETCONTROL variable, {DEFAULT_APPIMAGE}
+is tried first, then the packaged "{PACKAGED_COMMAND}" command, which most
+distributions provide (for example: sudo pacman -S headsetcontrol)."""
 
 LOGGER = logging.getLogger("g733-battery-tray")
 
@@ -53,37 +63,50 @@ def parse_interval(value: str, source: str) -> int:
         raise SystemExit(2) from None
 
 
-def parse_arguments() -> tuple[str, int]:
-    """Return HeadsetControl path and polling interval from a small CLI."""
+def parse_arguments() -> tuple[tuple[str, ...], int]:
+    """Return the HeadsetControl candidates and polling interval from a small CLI."""
     arguments = sys.argv[1:]
     # Handled before anything else so --help still works with a bad environment.
     if {"-h", "--help"}.intersection(arguments):
         print(USAGE)
         raise SystemExit(0)
 
-    command = os.environ.get("HEADSETCONTROL", str(DEFAULT_COMMAND))
+    # An empty or unset variable means "use the defaults", as in the shell.
+    command = os.environ.get("HEADSETCONTROL", "")
     interval = parse_interval(os.environ.get("POLL_SECONDS", "60"), "POLL_SECONDS")
 
     remaining = iter(arguments)
     for argument in remaining:
         if argument == "--command":
             command = next(remaining, "")
+            # An explicit empty value is a mistake, not a request for the default.
+            if not command:
+                print("--command requires a path or a command name", file=sys.stderr)
+                raise SystemExit(2)
         elif argument == "--interval":
             interval = parse_interval(next(remaining, ""), "--interval")
         else:
             print(f"Unknown argument: {argument}", file=sys.stderr)
             raise SystemExit(2)
 
-    if not command:
-        print("HeadsetControl command cannot be empty", file=sys.stderr)
-        raise SystemExit(2)
+    # An explicit choice is used on its own; only the default falls back.
+    commands = (command,) if command else DEFAULT_COMMANDS
     if interval < MINIMUM_INTERVAL_SECONDS:
         print(
             f"Polling interval must be at least {MINIMUM_INTERVAL_SECONDS} seconds",
             file=sys.stderr,
         )
         raise SystemExit(2)
-    return command, interval
+    return commands, interval
+
+
+def resolve_command(candidates: tuple[str, ...]) -> str | None:
+    """Return the first usable candidate, accepting a bare name found on PATH."""
+    for candidate in candidates:
+        resolved = shutil.which(candidate)
+        if resolved is not None:
+            return resolved
+    return None
 
 
 def format_duration(minutes: object, suffix: str) -> str:
@@ -141,8 +164,8 @@ def icon_for(level: int | None, *, is_error: bool = False, is_charging: bool = F
 
 
 class G733Tray:
-    def __init__(self, command: str, interval_seconds: int) -> None:
-        self.command = command
+    def __init__(self, commands: tuple[str, ...], interval_seconds: int) -> None:
+        self.commands = tuple(commands)
         self.interval_ms = interval_seconds * 1000
         self.in_flight = False
         self.low_battery_notified = False
@@ -189,10 +212,13 @@ class G733Tray:
             return
         # Resolved on every poll rather than once at startup, so an AppImage on
         # a volume that is mounted later starts working without a restart.
-        # shutil.which accepts both a path and a bare name to look up on PATH.
-        executable = shutil.which(self.command)
+        executable = resolve_command(self.commands)
         if executable is None:
-            self.show_error(f"HeadsetControl not found or not executable: {self.command}")
+            tried = " or ".join(self.commands)
+            self.show_error(
+                f"HeadsetControl not found or not executable: {tried}"
+                " — install the headsetcontrol package, or set HEADSETCONTROL."
+            )
             self.schedule_next_poll()
             return
 
@@ -297,7 +323,7 @@ class G733Tray:
 
 
 def main() -> int:
-    command, interval = parse_arguments()
+    commands, interval = parse_arguments()
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
@@ -312,7 +338,7 @@ def main() -> int:
     if not QSystemTrayIcon.isSystemTrayAvailable():
         print("No system tray is available in this desktop session.", file=sys.stderr)
         return 1
-    monitor = G733Tray(command, interval)
+    monitor = G733Tray(commands, interval)
     monitor.start()
     return app.exec()
 

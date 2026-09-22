@@ -7,9 +7,11 @@ system-tray monitor in [`tray/`](tray/README.md).
 ## Prerequisites
 
 - The G733 USB receiver is connected and the headset is on.
-- HeadsetControl is executable at
-  `~/Downloads/headsetcontrol-x86_64.AppImage`, or the `HEADSETCONTROL`
-  environment variable points to it.
+- HeadsetControl is available. Either install your distribution's package
+  (`sudo pacman -S headsetcontrol` on Arch), or keep the AppImage at
+  `~/Downloads/headsetcontrol-x86_64.AppImage`. The scripts try the AppImage
+  first and fall back to a `headsetcontrol` command on `PATH`, so an installed
+  package needs no configuration. `HEADSETCONTROL` overrides both.
 - `sudo` access is available to install the udev rule.
 
 The target device is deliberately restricted to Logitech vendor/product ID
@@ -119,6 +121,11 @@ monitor reads it too:
 ```bash
 HEADSETCONTROL=headsetcontrol ./battery-status.sh
 ```
+
+Setting `HEADSETCONTROL` disables the fallback: only that one command is tried,
+so a typo is reported rather than quietly replaced by another build. Leave it
+unset to get the AppImage-then-package order. The shared resolution lives in
+[`lib.sh`](lib.sh), which `battery-status.sh` and `watch-battery.sh` source.
 
 `TIMEOUT_SECONDS=20` changes the one-shot command timeout.
 

@@ -57,13 +57,18 @@ if you use both:
 POLL_SECONDS=120 ./start.sh
 ```
 
-The default HeadsetControl location is:
+With no option or variable set, the monitor tries two locations in order:
 
 ```text
 ~/Downloads/headsetcontrol-x86_64.AppImage
+headsetcontrol            (any command of that name on PATH)
 ```
 
-Override it when starting the monitor with either an option or environment
+The AppImage comes first because it is usually the newer build. The second entry
+means a distribution package works with no configuration; install one with, for
+example, `sudo pacman -S headsetcontrol`.
+
+Override both when starting the monitor with either an option or environment
 variable:
 
 ```bash
@@ -71,12 +76,15 @@ variable:
 HEADSETCONTROL=/path/to/headsetcontrol ./start.sh
 ```
 
-The value can also be a bare command name, which is looked up on `PATH`. Use
-this if HeadsetControl comes from your distribution instead of the AppImage:
+The value can also be a bare command name, which is looked up on `PATH`:
 
 ```bash
 HEADSETCONTROL=headsetcontrol ./start.sh
 ```
+
+An explicit choice disables the fallback, so only that command is tried and a
+typo is reported rather than quietly replaced by another build. `--help` prints
+the defaults in use.
 
 The location is resolved before each reading, not once at startup, so an
 AppImage on a volume that is mounted later starts working without a restart.

@@ -52,7 +52,7 @@ def device_json(battery: str) -> str:
 
 def read_once(command: str) -> str:
     """Run one refresh to completion and return the text the monitor settled on."""
-    monitor = tray.G733Tray(command, 3600)
+    monitor = tray.G733Tray((command,), 3600)
     monitor.refresh()
     deadline = time.monotonic() + REQUEST_TIMEOUT_SECONDS
     while monitor.in_flight and time.monotonic() < deadline:
@@ -143,10 +143,37 @@ class CommandResolutionTests(StubCommandMixin, unittest.TestCase):
         text = read_once("definitely-not-a-real-command")
         self.assertIn("not found or not executable", text)
 
+    def test_falls_back_to_the_next_candidate(self) -> None:
+        packaged = self.stub(self.PAYLOAD)
+        monitor = tray.G733Tray(("/nonexistent/headsetcontrol.AppImage", packaged), 3600)
+        self.addCleanup(monitor.poll_timer.stop)
+        monitor.refresh()
+        deadline = time.monotonic() + REQUEST_TIMEOUT_SECONDS
+        while monitor.in_flight and time.monotonic() < deadline:
+            APP.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 50)
+        self.assertEqual(monitor.status_action.text(), "G733 battery: 77% · about 7h 0m left")
+
+    def test_the_first_usable_candidate_wins(self) -> None:
+        preferred = self.stub(self.PAYLOAD, name="preferred")
+        other = self.stub(device_json('{"status":"BATTERY_AVAILABLE","level":5}'), name="other")
+        self.assertEqual(tray.resolve_command((preferred, other)), preferred)
+
+    def test_error_suggests_the_package(self) -> None:
+        monitor = tray.G733Tray(("/nope/one",), 3600)
+        self.addCleanup(monitor.poll_timer.stop)
+        monitor.refresh()
+        self.assertIn("headsetcontrol package", monitor.status_action.text())
+
+    def test_error_names_every_candidate_tried(self) -> None:
+        monitor = tray.G733Tray(("/nope/one", "/nope/two"), 3600)
+        self.addCleanup(monitor.poll_timer.stop)
+        monitor.refresh()
+        self.assertIn("/nope/one or /nope/two", monitor.status_action.text())
+
 
 class NotificationTests(StubCommandMixin, unittest.TestCase):
     def monitor(self) -> tray.G733Tray:
-        monitor = tray.G733Tray(self.stub(device_json("{}")), 3600)
+        monitor = tray.G733Tray((self.stub(device_json("{}")),), 3600)
         self.addCleanup(monitor.poll_timer.stop)
         return monitor
 
@@ -167,7 +194,7 @@ class ErrorLoggingTests(StubCommandMixin, unittest.TestCase):
     """Errors must reach stderr; an autostarted monitor has no other channel."""
 
     def monitor(self) -> tray.G733Tray:
-        monitor = tray.G733Tray(self.stub(device_json("{}")), 3600)
+        monitor = tray.G733Tray((self.stub(device_json("{}")),), 3600)
         self.addCleanup(monitor.poll_timer.stop)
         return monitor
 
@@ -231,16 +258,25 @@ class ArgumentTests(unittest.TestCase):
             self.output = stdout.getvalue() + stderr.getvalue()
 
     def test_defaults(self) -> None:
-        command, interval = self.parse([], HEADSETCONTROL="/bin/true", POLL_SECONDS="60")
-        self.assertEqual((command, interval), ("/bin/true", 60))
+        commands, interval = self.parse([], HEADSETCONTROL="/bin/true", POLL_SECONDS="60")
+        self.assertEqual((commands, interval), (("/bin/true",), 60))
 
     def test_options_override_the_environment(self) -> None:
-        command, interval = self.parse(
+        commands, interval = self.parse(
             ["--command", "/bin/false", "--interval", "120"],
             HEADSETCONTROL="/bin/true",
             POLL_SECONDS="60",
         )
-        self.assertEqual((command, interval), ("/bin/false", 120))
+        self.assertEqual((commands, interval), (("/bin/false",), 120))
+
+    def test_no_choice_falls_back_from_the_appimage_to_the_package(self) -> None:
+        commands, _ = self.parse([], HEADSETCONTROL="")
+        self.assertEqual(commands, (str(tray.DEFAULT_APPIMAGE), "headsetcontrol"))
+
+    def test_an_explicit_choice_does_not_fall_back(self) -> None:
+        # Falling back here would silently run a different binary than asked for.
+        commands, _ = self.parse(["--command", "/bin/true"])
+        self.assertEqual(commands, ("/bin/true",))
 
     def test_help_works_even_with_a_bad_environment(self) -> None:
         # Regression: the environment used to be parsed before --help.
