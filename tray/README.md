@@ -75,6 +75,19 @@ AppImage on a volume that is mounted later starts working without a restart.
 
 The app never invokes HeadsetControl with `sudo`.
 
+## Tests
+
+```bash
+cd ~/WORK/g733-battery-tools/tray
+python3 test_tray.py
+```
+
+The suite needs only the standard library and PyQt6, and runs headless with the
+Qt `offscreen` platform, so it needs no display and no headset. It drives the
+real monitor against stub commands that print recorded HeadsetControl output,
+covering the battery states, the command lookup, the icon colours, the error
+logging and the command line.
+
 ## Start automatically with KDE
 
 ```bash
