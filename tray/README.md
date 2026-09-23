@@ -34,7 +34,8 @@ From this directory:
 ```
 
 The tray icon starts as `?`, then updates after its first reading. The number
-inside it is the battery percentage. Left-click or double-click the icon for an
+inside it is the estimated battery percentage; while the headset charges, the
+icon shows a bolt instead. Left-click or double-click the icon for an
 immediate refresh; right-click for Refresh now, Lights and Quit.
 
 `./start.sh` runs the monitor in the foreground, so its terminal stays occupied
@@ -161,8 +162,8 @@ somewhat high.
   charging has finished. It is sent again only after the headset has been off
   the cable, so a headset left charging overnight is announced once.
 - A grey `!` means something went wrong: the headset is off or out of range, or
-  the headset tool failed. Hover the icon for what happened. The `!` is replaced by
-  the battery reading as soon as one succeeds again.
+  the headset tool failed. Hover the icon for what happened. The `!` is
+  replaced by the battery reading as soon as one succeeds again.
 - A grey `?` means no reading has completed yet, which is the state the monitor
   starts in.
 - Errors are also written to standard error, so an autostarted monitor can be
@@ -198,7 +199,8 @@ somewhat high.
   put on the icon: the icon reports the battery, and that reading is still
   valid. The restore at startup is not notified — the headset is commonly off
   when an autostarted monitor begins, and you pressed nothing to cause it.
-- Each battery reading and lights request has a 15-second timeout, and failures
-  are retried on the next interval.
+- Each battery reading and lights request has a 15-second timeout. A failed
+  battery reading is retried at the next interval; a failed lights request is
+  not retried, so click **Lights** again.
 
 [solaar]: https://github.com/pwr-Solaar/Solaar
