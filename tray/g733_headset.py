@@ -84,7 +84,10 @@ HIDPP20_ERRORS = {
 
 SYSFS_HIDRAW = Path("/sys/class/hidraw")
 INSTALL_RULE = Path(__file__).resolve().parent.parent / "install-udev-rule.sh"
-UDEV_HINT = f"run {INSTALL_RULE}, then reconnect the receiver"
+UDEV_HINT = (
+    f"run {INSTALL_RULE}, then reconnect the receiver"
+    " (log in again if the rule added you to a group)"
+)
 
 
 class HeadsetError(Exception):

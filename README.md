@@ -29,11 +29,32 @@ Enter your sudo password when prompted. The script writes:
 /etc/udev/rules.d/99-logitech-g733-hidraw.rules
 ```
 
-The installer writes a direct owner rule naming the account that runs it, as
-`OWNER="<your user>", MODE="0600"`. This is intentionally limited to the G733's
-`046d:0b1f` HID interface and grants access to that one account. It is used
-instead of `TAG+="uaccess"` because some KDE/logind setups do not apply a user
-ACL to hidraw devices.
+By default the installer writes a direct owner rule naming the account that
+runs it, as `OWNER="<your user>", MODE="0600"`. To give the headset to a
+different account, name it:
+
+```bash
+./install-udev-rule.sh alice
+```
+
+A device node has only one owner. To let several accounts use the headset,
+give it to a group instead:
+
+```bash
+./install-udev-rule.sh --group g733 alice bob
+```
+
+This writes `GROUP="g733", MODE="0660"`, creates the `g733` group if it does
+not exist, and adds `alice` and `bob` to it. Without user names, it adds only
+the account that runs it. Each added user must log out and back in before the
+new group membership applies. Run the installer again with other users to add
+them; it replaces the rule each time, and users already in the group are left
+as they are.
+
+Both forms are intentionally limited to the G733's `046d:0b1f` HID interface.
+They are used instead of `TAG+="uaccess"` because some KDE/logind setups do not
+apply a user ACL to hidraw devices. `./install-udev-rule.sh --help` prints the
+usage.
 
 The installer then re-triggers `hidraw` events, so a receiver that is already
 connected picks up the rule straight away. If the receiver was not connected at
@@ -49,8 +70,9 @@ First inspect the HID devices and the ACL on the G733 node:
 ```
 
 For the detected G733, `getfacl` should show your username as `owner:` and
-`user::rw-` (the exact node number can change after reconnecting). Then take
-one battery reading:
+`user::rw-`, or with `--group`, the group name as `group:` and `group::rw-`
+(the exact node number can change after reconnecting). Then take one battery
+reading:
 
 ```bash
 ./battery-status.sh
@@ -116,7 +138,10 @@ To make it start automatically whenever you log in to KDE:
 ```
 
 This creates `~/.config/autostart/g733-battery-tray.desktop`. It will run on
-your next login; log out and back in to test it. Remove that autostart entry
+your next login; log out and back in to test it. The entry points at this
+checkout and applies only to the account that runs the script. Each other user
+runs `./install-autostart.sh` as themselves, from a checkout they can read, such
+as their own clone or a copy in `/opt`. Remove that autostart entry
 later with:
 
 ```bash
@@ -133,7 +158,8 @@ See [`tray/README.md`](tray/README.md) for options and troubleshooting.
 
 Like the installer, this re-triggers `hidraw` events, so a connected receiver
 returns to root ownership immediately. If it was not connected, the change
-applies when you plug it in.
+applies when you plug it in. A group created with `--group` is kept, with its
+members; delete it with `sudo groupdel <group>` if nothing else uses it.
 
 ## Credits
 
