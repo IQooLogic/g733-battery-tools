@@ -6,11 +6,13 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shutil
 import signal
+import statistics
 import sys
 import time
+from collections import deque
 from functools import partial
+from itertools import pairwise
 from pathlib import Path
 
 from PyQt6.QtCore import QProcess, QRectF, Qt, QTimer
@@ -27,37 +29,55 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
-DEFAULT_APPIMAGE = Path.home() / "Downloads" / "headsetcontrol-x86_64.AppImage"
-# Distributions package HeadsetControl as "headsetcontrol". The AppImage is
-# tried first because it is usually the newer build; the package is the
-# fallback, so an installed package works with no configuration.
-PACKAGED_COMMAND = "headsetcontrol"
-DEFAULT_COMMANDS = (str(DEFAULT_APPIMAGE), PACKAGED_COMMAND)
+# The script beside this one talks HID++ to the headset, for both the battery
+# and the lights. It runs as its own process so a headset that does not answer
+# can be timed out and killed without blocking the tray.
+DEFAULT_HEADSET = (sys.executable, str(Path(__file__).resolve().with_name("g733_headset.py")))
 LOW_BATTERY_PERCENT = 20
 LOW_BATTERY_RESET_PERCENT = 25
-# HeadsetControl has no "full" status, so a full charge is a charging reading
-# that has reached 100%. The reset level re-arms the notification only after a
-# real discharge, so a headset left on the cable is announced once.
-FULL_BATTERY_PERCENT = 100
-FULL_BATTERY_RESET_PERCENT = 95
 MINIMUM_INTERVAL_SECONDS = 5
 REQUEST_TIMEOUT_MS = 15_000
-# Measured on the G733: for about two seconds after a lights write the headset
-# answers battery requests with BATTERY_UNAVAILABLE. A reading taken inside that
-# window would show a false "?", so readings are held off and then retried.
+# Measured on the G733 when HeadsetControl switched the lights: for about two
+# seconds afterwards it got no usable battery reading. A reading taken inside
+# that window would show a false "!", so readings are held off and then retried.
 LIGHTS_SETTLE_MS = 3_000
 
-# HeadsetControl battery states this monitor can display. Anything else is an
-# error: the headset is off, out of range, or the receiver failed to answer.
-STATUS_AVAILABLE = "BATTERY_AVAILABLE"
-STATUS_CHARGING = "BATTERY_CHARGING"
+# The battery states the headset tool reports. It exits with an error for
+# anything else.
+STATE_DISCHARGING = "discharging"
+STATE_CHARGING = "charging"
+STATE_FULL = "full"
+BATTERY_STATES = {STATE_DISCHARGING, STATE_CHARGING, STATE_FULL}
 
-USAGE = f"""Usage: g733_battery_tray.py [--command PATH] [--interval SECONDS]
+# The headset reports only a voltage, so the percentage is an estimate from a
+# Li-ion discharge curve: Solaar's measured (millivolt, percent) table, which
+# OpenLogi also uses. It holds only while discharging; a charger raises the
+# voltage, so no percentage is estimated while one is connected.
+DISCHARGE_CURVE = (
+    (4186, 100),
+    (4067, 90),
+    (3989, 80),
+    (3922, 70),
+    (3859, 60),
+    (3811, 50),
+    (3778, 40),
+    (3751, 30),
+    (3717, 20),
+    (3671, 10),
+    (3646, 5),
+    (3579, 2),
+    (3500, 0),
+)
+# The voltage moves by tens of millivolts with volume and lighting load, which
+# is several percent on the curve. The median of the last few discharging
+# readings keeps one such swing off the icon; at the default one-minute
+# interval a real change shows within three readings.
+SMOOTHING_READINGS = 5
 
-PATH may be a path or a command name found on PATH. Without --command or the
-HEADSETCONTROL variable, {DEFAULT_APPIMAGE}
-is tried first, then the packaged "{PACKAGED_COMMAND}" command, which most
-distributions provide (for example: sudo pacman -S headsetcontrol)."""
+USAGE = f"""Usage: g733_battery_tray.py [--interval SECONDS]
+
+Polls the G733 battery every SECONDS seconds (default 60, minimum
+{MINIMUM_INTERVAL_SECONDS}). POLL_SECONDS sets the same value; the option wins."""
 
 LOGGER = logging.getLogger("g733-battery-tray")
 
@@ -79,57 +99,43 @@ def parse_interval(value: str, source: str) -> int:
         raise SystemExit(2) from None
 
 
-def parse_arguments() -> tuple[tuple[str, ...], int]:
-    """Return the HeadsetControl candidates and polling interval from a small CLI."""
+def parse_arguments() -> int:
+    """Return the polling interval from a small CLI."""
     arguments = sys.argv[1:]
     # Handled before anything else so --help still works with a bad environment.
     if {"-h", "--help"}.intersection(arguments):
         print(USAGE)
         raise SystemExit(0)
 
-    # An empty or unset variable means "use the defaults", as in the shell.
-    command = os.environ.get("HEADSETCONTROL", "")
     interval = parse_interval(os.environ.get("POLL_SECONDS", "60"), "POLL_SECONDS")
 
     remaining = iter(arguments)
     for argument in remaining:
-        if argument == "--command":
-            command = next(remaining, "")
-            # An explicit empty value is a mistake, not a request for the default.
-            if not command:
-                print("--command requires a path or a command name", file=sys.stderr)
-                raise SystemExit(2)
-        elif argument == "--interval":
+        if argument == "--interval":
             interval = parse_interval(next(remaining, ""), "--interval")
         else:
             print(f"Unknown argument: {argument}", file=sys.stderr)
             raise SystemExit(2)
 
-    # An explicit choice is used on its own; only the default falls back.
-    commands = (command,) if command else DEFAULT_COMMANDS
     if interval < MINIMUM_INTERVAL_SECONDS:
         print(
             f"Polling interval must be at least {MINIMUM_INTERVAL_SECONDS} seconds",
             file=sys.stderr,
         )
         raise SystemExit(2)
-    return commands, interval
+    return interval
 
 
-def resolve_command(candidates: tuple[str, ...]) -> str | None:
-    """Return the first usable candidate, accepting a bare name found on PATH."""
-    for candidate in candidates:
-        resolved = shutil.which(candidate)
-        if resolved is not None:
-            return resolved
-    return None
-
-
-def format_duration(minutes: object, suffix: str) -> str:
-    """Render a HeadsetControl minute count, which is absent or -1 when unknown."""
-    if not isinstance(minutes, int) or minutes <= 0:
-        return ""
-    return f" · about {minutes // 60}h {minutes % 60}m {suffix}"
+def estimate_percent(voltage_mv: float) -> int:
+    """Estimate the charge of a discharging battery from its voltage."""
+    top_mv, top_percent = DISCHARGE_CURVE[0]
+    if voltage_mv >= top_mv:
+        return top_percent
+    for (high_mv, high_percent), (low_mv, low_percent) in pairwise(DISCHARGE_CURVE):
+        if voltage_mv >= low_mv:
+            fraction = (voltage_mv - low_mv) / (high_mv - low_mv)
+            return round(low_percent + fraction * (high_percent - low_percent))
+    return 0
 
 
 def bolt_path(area: QRectF) -> QPainterPath:
@@ -247,9 +253,12 @@ def icon_for(level: int | None, *, is_error: bool = False, is_charging: bool = F
 
 
 class G733Tray:
-    def __init__(self, commands: tuple[str, ...], interval_seconds: int) -> None:
-        self.commands = tuple(commands)
+    def __init__(self, interval_seconds: int, headset: tuple[str, ...] = DEFAULT_HEADSET) -> None:
+        # The command line that runs the headset tool; its subcommand is added.
+        self.headset = tuple(headset)
         self.interval_ms = interval_seconds * 1000
+        # Recent discharging voltages, for the median shown as the level.
+        self.voltages: deque[int] = deque(maxlen=SMOOTHING_READINGS)
         self.in_flight = False
         # Set while shutting down, so a request killed on the way out is not
         # reported as a fault the user should act on.
@@ -329,9 +338,9 @@ class G733Tray:
         if self.lights_preference is None:
             QTimer.singleShot(0, self.refresh)
             return
-        # Applied before the first reading rather than beside it: two concurrent
-        # HeadsetControl processes would contend for the same HID device. The
-        # first reading follows as soon as the restore settles.
+        # Applied before the first reading rather than beside it, so the reading
+        # does not land inside the window a lights write opens. The first
+        # reading follows as soon as the restore settles.
         self.restoring_lights = True
         QTimer.singleShot(0, partial(self.set_lights, self.lights_preference))
 
@@ -345,38 +354,22 @@ class G733Tray:
     def refresh(self) -> None:
         if self.in_flight:
             return
-        # Resolved on every poll rather than once at startup, so an AppImage on
-        # a volume that is mounted later starts working without a restart.
-        executable = resolve_command(self.commands)
-        if executable is None:
-            self.show_error(self.missing_command_message())
-            self.schedule_next_poll()
-            return
-
         self.in_flight = True
         self.refresh_action.setEnabled(False)
         self.status_action.setText("G733: refreshing…")
-        self.process.start(executable, ["-b", "-o", "json"])
+        self.run_headset(self.process, "battery")
         self.timeout.start(REQUEST_TIMEOUT_MS)
 
-    def missing_command_message(self) -> str:
-        """Describe every candidate that was tried, so a typo is visible."""
-        tried = " or ".join(self.commands)
-        return (
-            f"HeadsetControl not found or not executable: {tried}"
-            " — install the headsetcontrol package, or set HEADSETCONTROL."
-        )
+    def run_headset(self, process: QProcess, *arguments: str) -> None:
+        """Start one headset tool command on one of the two processes."""
+        program, *base = self.headset
+        process.start(program, [*base, *arguments])
 
     def set_lights(self, on: bool) -> None:
-        """Ask HeadsetControl to switch the headset RGB lighting on or off."""
+        """Ask the headset to switch its RGB lighting on or off."""
         # Both items drive one process, so a second press while the first
         # request runs is ignored rather than queued behind it.
         if self.lights_process.state() != QProcess.ProcessState.NotRunning:
-            return
-        executable = resolve_command(self.commands)
-        if executable is None:
-            self.report_lights_failure(self.missing_command_message())
-            self.settle_lights_request()
             return
         self.lights_request = on
         for action in self.lights_actions.values():
@@ -385,7 +378,7 @@ class G733Tray:
         # remembered state until this request succeeds.
         self.update_lights_checks()
         self.lights_actions[on].setText(f"Turning lights {self.lights_state()}…")
-        self.lights_process.start(executable, ["-l", "1" if on else "0"])
+        self.run_headset(self.lights_process, "lights", self.lights_state())
         self.lights_timeout.start(REQUEST_TIMEOUT_MS)
 
     def lights_state(self) -> str:
@@ -431,7 +424,7 @@ class G733Tray:
         state = self.lights_state()
         self.finish_lights_request()
         if exit_code != 0:
-            details = error_output or output or f"command exited with {exit_code}"
+            details = error_output or output or f"headset tool exited with {exit_code}"
             self.report_lights_failure(f"Could not turn the G733 lights {state}: {details}")
         else:
             LOGGER.info("lights turned %s", state)
@@ -449,7 +442,7 @@ class G733Tray:
         if error == QProcess.ProcessError.FailedToStart:
             self.finish_lights_request()
             self.report_lights_failure(
-                f"Could not start HeadsetControl: {self.lights_process.errorString()}"
+                f"Could not start the headset tool: {self.lights_process.errorString()}"
             )
             self.settle_lights_request()
 
@@ -487,31 +480,29 @@ class G733Tray:
         output = bytes(self.process.readAllStandardOutput()).decode(errors="replace")
         error_output = bytes(self.process.readAllStandardError()).decode(errors="replace").strip()
         self.finish_request()
-        try:
-            payload = json.loads(output)
-            battery = payload["devices"][0]["battery"]
-            status = battery.get("status")
-            if status not in {STATUS_AVAILABLE, STATUS_CHARGING}:
-                raise ValueError(status or "battery unavailable")
-            level = battery.get("level")
-            if not isinstance(level, int) or not 0 <= level <= 100:
-                # A charging headset may report no usable percentage; that is a
-                # state to display, not a failure. Any other status must have one.
-                if status != STATUS_CHARGING:
-                    raise ValueError(status or "battery unavailable")
-                level = None
-        except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            details = error_output or str(exc) or f"command exited with {exit_code}"
+        if exit_code != 0:
+            details = error_output or f"headset tool exited with {exit_code}"
             self.show_error(f"G733 battery unavailable: {details}")
             return
-        self.show_level(level, battery, is_charging=status == STATUS_CHARGING)
+        try:
+            reading = json.loads(output)
+            state = reading["state"]
+            voltage_mv = reading["voltage_mv"]
+            if state not in BATTERY_STATES:
+                raise ValueError(f"unknown state {state!r}")
+            if not isinstance(voltage_mv, int) or voltage_mv <= 0:
+                raise ValueError(f"invalid voltage {voltage_mv!r}")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            self.show_error(f"G733 battery unavailable: unreadable headset tool output: {exc}")
+            return
+        self.show_reading(state, voltage_mv)
 
     def process_error(self, error: QProcess.ProcessError) -> None:
         if self.quitting:
             return
         if error == QProcess.ProcessError.FailedToStart and self.in_flight:
             self.finish_request()
-            self.show_error(f"Could not start HeadsetControl: {self.process.errorString()}")
+            self.show_error(f"Could not start the headset tool: {self.process.errorString()}")
 
     def process_timed_out(self) -> None:
         if not self.in_flight:
@@ -520,24 +511,35 @@ class G733Tray:
         self.finish_request()
         self.show_error("G733 battery request timed out")
 
-    def show_level(self, level: int | None, battery: dict, *, is_charging: bool) -> None:
-        if is_charging:
-            percent = "" if level is None else f" {level}%"
-            text = f"G733 battery: charging{percent}"
-            text += format_duration(battery.get("time_to_full_min"), "until full")
+    def show_reading(self, state: str, voltage_mv: int) -> None:
+        """Display one battery reading, and raise any notification it calls for."""
+        if state == STATE_DISCHARGING:
+            self.voltages.append(voltage_mv)
+            smoothed_mv = round(statistics.median(self.voltages))
+            level = estimate_percent(smoothed_mv)
+            text = f"G733 battery: {level}% · {smoothed_mv} mV"
+            icon = icon_for(level)
         else:
-            text = f"G733 battery: {level}%"
-            text += format_duration(battery.get("time_to_empty_min"), "left")
+            # A charger holds the voltage up, so neither the history nor a
+            # percentage estimated from it would mean anything.
+            self.voltages.clear()
+            level = None
+            if state == STATE_FULL:
+                text = "G733 battery: fully charged"
+                icon = icon_for(100, is_charging=True)
+            else:
+                text = "G733 battery: charging"
+                icon = icon_for(None, is_charging=True)
 
         if self.last_error is not None:
             LOGGER.info("recovered: %s", text)
             self.last_error = None
 
-        self.tray.setIcon(icon_for(level, is_charging=is_charging))
+        self.tray.setIcon(icon)
         self.status_text = text
         self.apply_status()
 
-        if is_charging:
+        if level is None:
             self.low_battery_notified = False
         elif level <= LOW_BATTERY_PERCENT and not self.low_battery_notified:
             self.tray.showMessage(
@@ -547,17 +549,17 @@ class G733Tray:
         elif level >= LOW_BATTERY_RESET_PERCENT:
             self.low_battery_notified = False
 
-        if is_charging and level is not None and level >= FULL_BATTERY_PERCENT:
+        if state == STATE_FULL:
             if not self.full_battery_notified:
                 self.tray.showMessage(
                     "G733 fully charged",
-                    "Battery is at 100%. The headset can come off the cable.",
+                    "The headset has finished charging and can come off the cable.",
                     QSystemTrayIcon.MessageIcon.Information,
                 )
                 self.full_battery_notified = True
-        elif not is_charging or (level is not None and level <= FULL_BATTERY_RESET_PERCENT):
-            # Re-armed once the headset leaves the cable or drops below full, so
-            # the next full charge is announced and a steady 100% is not.
+        elif state == STATE_DISCHARGING:
+            # Re-armed only once the headset leaves the cable, so a headset left
+            # on it, which may top up and finish again, is announced once.
             self.full_battery_notified = False
 
     def show_error(self, message: str) -> None:
@@ -566,6 +568,9 @@ class G733Tray:
         if message != self.last_error:
             LOGGER.error("%s", message)
             self.last_error = message
+        # The headset may have been off for hours; its old voltages no longer
+        # describe the battery.
+        self.voltages.clear()
         self.tray.setIcon(icon_for(None, is_error=True))
         self.status_text = message
         self.apply_status()
@@ -604,7 +609,7 @@ class G733Tray:
 
 
 def main() -> int:
-    commands, interval = parse_arguments()
+    interval = parse_arguments()
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
@@ -619,7 +624,7 @@ def main() -> int:
     if not QSystemTrayIcon.isSystemTrayAvailable():
         print("No system tray is available in this desktop session.", file=sys.stderr)
         return 1
-    monitor = G733Tray(commands, interval)
+    monitor = G733Tray(interval)
     monitor.start()
     return app.exec()
 

@@ -17,6 +17,6 @@ select = [
 ]
 
 [tool.ruff.lint.isort]
-# test_tray.py imports the module beside it; without this ruff sorts it in with
+# The tests import the modules beside them; without this ruff sorts them in with
 # the third-party PyQt6 imports.
-known-first-party = ["g733_battery_tray"]
+known-first-party = ["g733_battery_tray", "g733_headset"]

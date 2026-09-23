@@ -1,23 +1,29 @@
 # G733 KDE tray monitor
 
 A small PyQt6 application that displays the Logitech G733 battery in the KDE
-Plasma system tray. Its icon contains the current percentage, coloured by charge
-level and blue while charging, and its tooltip adds the estimated time remaining
-or until full when HeadsetControl reports one. Its context menu can also switch
-the headset lights on or off, and applies the last state you chose each time it
-starts.
+Plasma system tray. Its icon contains the estimated percentage, coloured by
+charge level, and turns blue with a lightning bolt while the headset is on the
+cable. Its tooltip adds the battery voltage the estimate came from. Its context
+menu can also switch the headset lights on or off, and applies the last state
+you chose each time it starts.
+
+Both the battery and the lights go through
+[`g733_headset.py`](g733_headset.py), which talks HID++ to the headset
+directly. See [How the battery is read](#how-the-battery-is-read).
 
 ## Prerequisite
 
-The parent directory's udev setup must already work:
+The parent directory's udev setup must already work. Take one reading:
 
 ```bash
-cd ..
-./battery-status.sh
+./g733_headset.py battery
 ```
 
-It must show `"status": "success"` and a battery level before starting this
-app. PyQt6 is also required; on Arch it is packaged as `python-pyqt6`.
+It must print one JSON line, such as
+`{"voltage_mv": 3812, "flags": 1, "state": "discharging"}`, before you start
+this app. A permission error means the udev rule is not installed or not yet
+applied; see the [parent README](../README.md). PyQt6 is also required; on Arch
+it is packaged as `python-pyqt6`.
 
 ## Start it now
 
@@ -60,55 +66,26 @@ if you use both:
 POLL_SECONDS=120 ./start.sh
 ```
 
-With no option or variable set, the monitor tries two locations in order:
-
-```text
-~/Downloads/headsetcontrol-x86_64.AppImage
-headsetcontrol            (any command of that name on PATH)
-```
-
-The AppImage comes first because it is usually the newer build. The second entry
-means a distribution package works with no configuration; install one with, for
-example, `sudo pacman -S headsetcontrol`. Both come from
-[HeadsetControl][hc], whose [releases][hc-releases] page publishes the AppImage.
-
-Override both when starting the monitor with either an option or environment
-variable:
-
-```bash
-./start.sh --command /path/to/headsetcontrol
-HEADSETCONTROL=/path/to/headsetcontrol ./start.sh
-```
-
-The value can also be a bare command name, which is looked up on `PATH`:
-
-```bash
-HEADSETCONTROL=headsetcontrol ./start.sh
-```
-
-An explicit choice disables the fallback, so only that command is tried and a
-typo is reported rather than quietly replaced by another build. `--help` prints
-the defaults in use.
-
-The location is resolved before each reading, not once at startup, so an
-AppImage on a volume that is mounted later starts working without a restart.
-
-The app never invokes HeadsetControl with `sudo`.
+`--help` prints the usage. The `--command` option and the `HEADSETCONTROL`
+variable of earlier versions are gone; `--command` is now rejected as an
+unknown argument.
 
 ## Tests
 
 From this directory:
 
 ```bash
-python3 test_tray.py
+python3 -m unittest
 ```
 
 The suite needs only the standard library and PyQt6, and runs headless with the
-Qt `offscreen` platform, so it needs no display and no headset. It drives the
-real monitor against stub commands that print recorded HeadsetControl output,
-covering the battery states, the command lookup, the lights items and the state
-they remember, the icon colours and the charging bolt, the error reporting and
-the command line.
+Qt `offscreen` platform, so it needs no display and no headset.
+`test_tray.py` drives the real monitor against a stub headset tool, covering
+the battery states, the estimate and its smoothing, the notifications, the
+lights items and the state they remember, the icon colours and the charging
+bolt, the error reporting and the command line. `test_headset.py` runs the
+headset tool against a simulated headset and a simulated sysfs tree, covering
+device lookup, reply matching, the battery flags and the lights zones.
 
 Linting and formatting use [ruff](https://docs.astral.sh/ruff/), configured in
 the repository's `pyproject.toml`. It is optional to run, and not needed to use
@@ -138,33 +115,66 @@ installing it. To stop automatic startup:
 ./remove-autostart.sh
 ```
 
+## How the battery is read
+
+The G733 does not report a percentage. Its only battery source is the HID++
+feature `ADC_MEASUREMENT` (`0x1F20`), which gives the cell voltage and a flags
+byte. `g733_headset.py battery` finds the headset's HID++ interface under
+`/sys/class/hidraw`, asks the headset where that feature is, and prints one
+reading:
+
+| flags  | state         | shown as                                   |
+|--------|---------------|--------------------------------------------|
+| `0x01` | `discharging` | the estimated percentage                   |
+| `0x03` | `charging`    | a bolt, with no percentage                 |
+| `0x07` | `full`        | `100` with a bolt; announced once          |
+
+These are the values measured on this headset. Any other flags value is
+reported as an error that names it, rather than guessed at. HeadsetControl,
+which this monitor used before, counts only `0x03` as charging, so it reports
+a finished charge as a discharging battery.
+
+While discharging, the percentage is estimated from the voltage with the
+13-point Li-ion curve that [Solaar][solaar] uses, and that OpenLogi copies. The
+voltage moves by tens of millivolts with volume and lighting load, which is
+several percent on that curve, so the icon shows the median of the last five
+discharging readings. At the default interval a real change shows within three
+minutes. The history starts again after the headset is charged or cannot be
+read.
+
+While charging, no percentage is shown. The charger holds the voltage near
+4.2 V long before the battery is full, so any estimate from it reads 100%
+within minutes of plugging in. Just after the headset comes off the cable, its
+voltage is still high and settles over a while, so the first readings can be
+somewhat high.
+
 ## Behaviour
 
 - Green: above 50%; amber: 21–50%; red: 20% or below.
-- Blue and a lightning bolt mean the headset is charging. The icon keeps the
-  percentage when HeadsetControl reports one and draws the bolt beside it; when
-  no percentage is reported, the bolt fills the icon. The bolt is there so
-  charging does not depend on telling blue from green. The tooltip then gives
-  the estimated time until full.
+- Blue and a lightning bolt mean the headset is on the cable. While it charges
+  the bolt fills the icon; once charging has finished the icon shows `100`
+  with the bolt beside it. The bolt is there so charging does not depend on
+  telling blue from green.
 - A low-battery notification is sent once at 20% or below; it resets after the
   charge rises to at least 25%, or as soon as charging starts. No low-battery
   notification is sent while the headset charges.
-- A "fully charged" notification is sent once when a charging reading reaches
-  100%. HeadsetControl reports no "full" status, so that reading is what full
-  means here. It is sent again only after the headset comes off the cable or
-  drops below 95%, so a headset left charging overnight is announced once.
+- A "fully charged" notification is sent once when the headset reports that
+  charging has finished. It is sent again only after the headset has been off
+  the cable, so a headset left charging overnight is announced once.
 - A grey `!` means something went wrong: the headset is off or out of range, or
-  the command failed. Hover the icon for what happened. The `!` is replaced by
+  the headset tool failed. Hover the icon for what happened. The `!` is replaced by
   the battery reading as soon as one succeeds again.
 - A grey `?` means no reading has completed yet, which is the state the monitor
   starts in.
 - Errors are also written to standard error, so an autostarted monitor can be
   diagnosed by redirecting its output to a log file. A repeated error is logged
   once, and recovery is logged when a reading succeeds again.
-- **Turn lights on** and **Turn lights off** run `headsetcontrol -l 1` and
-  `headsetcontrol -l 0`. Both items are disabled while a request runs, and the
-  request uses its own process, so it does not cancel the current battery
-  reading.
+- **Turn lights on** and **Turn lights off** run `g733_headset.py lights on`
+  and `g733_headset.py lights off`. Each sets both lighting zones, either to a
+  cyan breathing effect or to Disabled; the effects are looked up in the
+  headset's own list rather than assumed. Both items are disabled while a
+  request runs, and the request uses its own process, so it does not cancel the
+  current battery reading.
 - The state you choose is remembered and ticked in the menu. It is applied again
   each time the monitor starts, which restores it after the headset has been
   powered off and on. Only a request that succeeded is remembered.
@@ -176,17 +186,17 @@ installing it. To stop automatic startup:
 
   `XDG_CONFIG_HOME` is honoured. Delete the file to stop applying a state at
   startup. An unreadable or invalid file is logged and ignored, not repaired.
-- For about two seconds after a lights change the headset answers battery
-  requests with `BATTERY_UNAVAILABLE`. The monitor therefore holds the next
-  reading back until that window has passed, and takes it then rather than
-  waiting a full interval, so a lights change does not show a false `?`.
+- For about two seconds after a lights change the headset gave no usable
+  battery reading, when HeadsetControl switched the lights. The monitor therefore
+  holds the next reading back until that window has passed, and takes it then
+  rather than waiting a full interval, so a lights change does not show a
+  false `!`.
 - A failed lights request is logged, notified, and then kept in the tooltip and
   under the lights items until a lights request succeeds. It is deliberately not
   put on the icon: the icon reports the battery, and that reading is still
   valid. The restore at startup is not notified — the headset is commonly off
   when an autostarted monitor begins, and you pressed nothing to cause it.
-- Each command request has a 15-second timeout, and failures are retried on the
-  next interval.
+- Each battery reading and lights request has a 15-second timeout, and failures
+  are retried on the next interval.
 
-[hc]: https://github.com/Sapd/HeadsetControl
-[hc-releases]: https://github.com/Sapd/HeadsetControl/releases
+[solaar]: https://github.com/pwr-Solaar/Solaar
