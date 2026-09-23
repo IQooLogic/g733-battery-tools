@@ -33,6 +33,7 @@ from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 # and the lights. It runs as its own process so a headset that does not answer
 # can be timed out and killed without blocking the tray.
 DEFAULT_HEADSET = (sys.executable, str(Path(__file__).resolve().with_name("g733_headset.py")))
+LIGHTS_LABEL = "Lights"
 LOW_BATTERY_PERCENT = 20
 LOW_BATTERY_RESET_PERCENT = 25
 MINIMUM_INTERVAL_SECONDS = 5
@@ -152,11 +153,6 @@ def bolt_path(area: QRectF) -> QPainterPath:
     transform.scale(area.width() / drawn.width(), area.height() / drawn.height())
     transform.translate(-drawn.x(), -drawn.y())
     return transform.map(bolt)
-
-
-def lights_label(on: bool) -> str:
-    """Name one lighting state the same way in menu items and messages."""
-    return f"Turn lights {'on' if on else 'off'}"
 
 
 def state_file() -> Path:
@@ -291,23 +287,19 @@ class G733Tray:
         self.lights_status_action.setVisible(False)
         self.refresh_action = QAction("Refresh now", self.menu)
         self.refresh_action.triggered.connect(self.refresh)
-        # Keyed by the state each item requests, so one code path serves both.
-        self.lights_actions = {}
-        for on in (True, False):
-            action = QAction(lights_label(on), self.menu)
-            # Checkable so the menu shows which state is remembered and will be
-            # applied at the next startup.
-            action.setCheckable(True)
-            action.triggered.connect(partial(self.set_lights, on))
-            self.lights_actions[on] = action
-        self.update_lights_checks()
+        # One item for both states: ticked while the lights are on, and a click
+        # asks for the other state. The tick follows the remembered state, which
+        # is also what the next startup applies.
+        self.lights_action = QAction(LIGHTS_LABEL, self.menu)
+        self.lights_action.setCheckable(True)
+        self.lights_action.triggered.connect(self.toggle_lights)
+        self.update_lights_check()
         self.quit_action = QAction("Quit", self.menu)
         self.quit_action.triggered.connect(self.quit)
         self.menu.addAction(self.status_action)
         self.menu.addSeparator()
         self.menu.addAction(self.refresh_action)
-        self.menu.addAction(self.lights_actions[True])
-        self.menu.addAction(self.lights_actions[False])
+        self.menu.addAction(self.lights_action)
         self.menu.addAction(self.lights_status_action)
         self.menu.addSeparator()
         self.menu.addAction(self.quit_action)
@@ -365,19 +357,24 @@ class G733Tray:
         program, *base = self.headset
         process.start(program, [*base, *arguments])
 
+    def toggle_lights(self) -> None:
+        """Ask for the state the Lights item is not showing."""
+        # With nothing remembered the item is unticked, so a click turns the
+        # lights on, as the unticked item suggests.
+        self.set_lights(self.lights_preference is not True)
+
     def set_lights(self, on: bool) -> None:
         """Ask the headset to switch its RGB lighting on or off."""
-        # Both items drive one process, so a second press while the first
-        # request runs is ignored rather than queued behind it.
+        # One process serves the item, so a second press while a request runs
+        # is ignored rather than queued behind it.
         if self.lights_process.state() != QProcess.ProcessState.NotRunning:
             return
         self.lights_request = on
-        for action in self.lights_actions.values():
-            action.setEnabled(False)
-        # Clicking a checkable item ticks it; the tick must keep showing the
-        # remembered state until this request succeeds.
-        self.update_lights_checks()
-        self.lights_actions[on].setText(f"Turning lights {self.lights_state()}…")
+        self.lights_action.setEnabled(False)
+        # Clicking a checkable item toggles its tick; the tick must keep showing
+        # the remembered state until this request succeeds.
+        self.update_lights_check()
+        self.lights_action.setText(f"Turning lights {self.lights_state()}…")
         self.run_headset(self.lights_process, "lights", self.lights_state())
         self.lights_timeout.start(REQUEST_TIMEOUT_MS)
 
@@ -392,10 +389,9 @@ class G733Tray:
         # the write just opened and report a battery that is only unreachable.
         if self.poll_timer.isActive():
             self.schedule_next_poll()
-        for on, action in self.lights_actions.items():
-            action.setEnabled(True)
-            action.setText(lights_label(on))
-        self.update_lights_checks()
+        self.lights_action.setEnabled(True)
+        self.lights_action.setText(LIGHTS_LABEL)
+        self.update_lights_check()
 
     def settle_lights_request(self) -> None:
         """Start the first battery reading once a startup restore has ended."""
@@ -404,15 +400,14 @@ class G733Tray:
         self.restoring_lights = False
         self.schedule_next_poll()
 
-    def update_lights_checks(self) -> None:
-        """Tick the item whose state is remembered, and only that one."""
-        for on, action in self.lights_actions.items():
-            action.setChecked(self.lights_preference == on)
+    def update_lights_check(self) -> None:
+        """Tick the Lights item when the remembered state is on."""
+        self.lights_action.setChecked(self.lights_preference is True)
 
     def remember_lights(self, on: bool) -> None:
         self.lights_preference = on
         save_lights_preference(on)
-        self.update_lights_checks()
+        self.update_lights_check()
 
     def lights_finished(self, exit_code: int, _exit_status: QProcess.ExitStatus) -> None:
         if self.quitting:

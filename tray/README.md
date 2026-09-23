@@ -35,8 +35,7 @@ From this directory:
 
 The tray icon starts as `?`, then updates after its first reading. The number
 inside it is the battery percentage. Left-click or double-click the icon for an
-immediate refresh; right-click for Refresh now, Turn lights on, Turn lights off
-and Quit.
+immediate refresh; right-click for Refresh now, Lights and Quit.
 
 `./start.sh` runs the monitor in the foreground, so its terminal stays occupied
 until you use the tray's **Quit** action. Quit returns you to the shell without
@@ -82,7 +81,7 @@ The suite needs only the standard library and PyQt6, and runs headless with the
 Qt `offscreen` platform, so it needs no display and no headset.
 `test_tray.py` drives the real monitor against a stub headset tool, covering
 the battery states, the estimate and its smoothing, the notifications, the
-lights items and the state they remember, the icon colours and the charging
+Lights item and the state it remembers, the icon colours and the charging
 bolt, the error reporting and the command line. `test_headset.py` runs the
 headset tool against a simulated headset and a simulated sysfs tree, covering
 device lookup, reply matching, the battery flags and the lights zones.
@@ -169,15 +168,18 @@ somewhat high.
 - Errors are also written to standard error, so an autostarted monitor can be
   diagnosed by redirecting its output to a log file. A repeated error is logged
   once, and recovery is logged when a reading succeeds again.
-- **Turn lights on** and **Turn lights off** run `g733_headset.py lights on`
-  and `g733_headset.py lights off`. Each sets both lighting zones, either to a
+- **Lights** is ticked while the lights are on. Clicking it switches them to
+  the other state by running `g733_headset.py lights on` or
+  `g733_headset.py lights off`. Each sets both lighting zones, either to a
   cyan breathing effect or to Disabled; the effects are looked up in the
-  headset's own list rather than assumed. Both items are disabled while a
-  request runs, and the request uses its own process, so it does not cancel the
+  headset's own list rather than assumed. The item is disabled while a request
+  runs, and the request uses its own process, so it does not cancel the
   current battery reading.
-- The state you choose is remembered and ticked in the menu. It is applied again
+- The state you choose is remembered, and the tick shows it. The tick changes
+  only after the headset has accepted the request. The state is applied again
   each time the monitor starts, which restores it after the headset has been
-  powered off and on. Only a request that succeeded is remembered.
+  powered off and on. With nothing remembered yet, the item is unticked and
+  the first click turns the lights on.
 - The remembered state is stored in:
 
   ```text
@@ -192,7 +194,7 @@ somewhat high.
   rather than waiting a full interval, so a lights change does not show a
   false `!`.
 - A failed lights request is logged, notified, and then kept in the tooltip and
-  under the lights items until a lights request succeeds. It is deliberately not
+  under the Lights item until a lights request succeeds. It is deliberately not
   put on the icon: the icon reports the battery, and that reading is still
   valid. The restore at startup is not notified — the headset is commonly off
   when an autostarted monitor begins, and you pressed nothing to cause it.

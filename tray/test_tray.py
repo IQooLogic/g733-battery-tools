@@ -86,6 +86,11 @@ def read_once(headset: str) -> str:
     return monitor.status_action.text()
 
 
+def monitor_menu(monitor: tray.G733Tray) -> list:
+    """Return the actions of the tray's context menu, separators left out."""
+    return [action for action in monitor.menu.actions() if not action.isSeparator()]
+
+
 def fill_colour(**kwargs) -> str:
     image = tray.icon_for(**kwargs).pixmap(QSize(64, 64)).toImage()
     return image.pixelColor(*FILL_SAMPLE).name()
@@ -255,6 +260,9 @@ class LightsTests(StubCommandMixin, unittest.TestCase):
 
     def run_lights(self, monitor: tray.G733Tray, on: bool = False) -> None:
         monitor.set_lights(on)
+        self.wait_for_lights(monitor)
+
+    def wait_for_lights(self, monitor: tray.G733Tray) -> None:
         deadline = time.monotonic() + REQUEST_TIMEOUT_SECONDS
         while (
             monitor.lights_process.state() != tray.QProcess.ProcessState.NotRunning
@@ -271,21 +279,39 @@ class LightsTests(StubCommandMixin, unittest.TestCase):
                 self.run_lights(monitor, on=on)
                 self.assertEqual(self.ran(), [expected])
 
-    def test_both_items_are_usable_again_afterwards(self) -> None:
+    def test_the_menu_has_one_lights_item(self) -> None:
+        labels = [action.text() for action in monitor_menu(self.monitor(self.tool()))]
+        self.assertEqual(labels.count("Lights"), 1)
+        self.assertFalse(any(label.startswith("Turn lights") for label in labels))
+
+    def test_a_click_asks_for_the_state_the_item_is_not_showing(self) -> None:
+        cases = {
+            "nothing remembered": (None, "lights on"),
+            "on": (True, "lights off"),
+            "off": (False, "lights on"),
+        }
+        for name, (remembered, expected) in cases.items():
+            with self.subTest(name):
+                self.record.unlink(missing_ok=True)
+                monitor = self.monitor(self.tool())
+                monitor.lights_preference = remembered
+                monitor.lights_action.trigger()
+                self.wait_for_lights(monitor)
+                self.assertEqual(self.ran(), [expected])
+
+    def test_the_item_is_usable_again_afterwards(self) -> None:
         monitor = self.monitor(self.tool())
         self.run_lights(monitor, on=True)
-        for on, label in ((True, "Turn lights on"), (False, "Turn lights off")):
-            with self.subTest(on=on):
-                self.assertTrue(monitor.lights_actions[on].isEnabled())
-                self.assertEqual(monitor.lights_actions[on].text(), label)
+        self.assertTrue(monitor.lights_action.isEnabled())
+        self.assertEqual(monitor.lights_action.text(), "Lights")
 
-    def test_the_other_item_is_disabled_while_a_request_runs(self) -> None:
-        # One process serves both items, so neither may start a second request.
+    def test_the_item_is_disabled_while_a_request_runs(self) -> None:
+        # One process serves the item, so it may not start a second request.
         monitor = self.monitor(self.tool())
         monitor.set_lights(True)
-        self.assertFalse(monitor.lights_actions[False].isEnabled())
-        self.assertEqual(monitor.lights_actions[True].text(), "Turning lights on…")
-        self.run_lights(monitor, on=True)
+        self.assertFalse(monitor.lights_action.isEnabled())
+        self.assertEqual(monitor.lights_action.text(), "Turning lights on…")
+        self.wait_for_lights(monitor)
 
     def test_success_is_logged_with_the_state_it_set(self) -> None:
         monitor = self.monitor(self.tool())
@@ -382,13 +408,24 @@ class LightsMemoryTests(StubCommandMixin, unittest.TestCase):
             self.settle(monitor)
         self.assertFalse(self.state_file.exists())
 
-    def test_the_menu_ticks_the_remembered_state(self) -> None:
+    def test_the_item_is_ticked_while_the_remembered_state_is_on(self) -> None:
         monitor = self.monitor(self.tool())
-        self.assertEqual([a.isChecked() for a in monitor.lights_actions.values()], [False, False])
+        self.assertFalse(monitor.lights_action.isChecked())
+        monitor.set_lights(True)
+        self.settle(monitor)
+        self.assertTrue(monitor.lights_action.isChecked())
         monitor.set_lights(False)
         self.settle(monitor)
-        self.assertFalse(monitor.lights_actions[True].isChecked())
-        self.assertTrue(monitor.lights_actions[False].isChecked())
+        self.assertFalse(monitor.lights_action.isChecked())
+
+    def test_a_failed_click_leaves_the_tick_alone(self) -> None:
+        # Qt toggles the tick on click; it must go back to what the headset has.
+        monitor = self.monitor(self.tool(lights_exit=1))
+        with self.assertLogs(tray.LOGGER, level="ERROR"):
+            monitor.lights_action.trigger()
+            self.assertFalse(monitor.lights_action.isChecked())
+            self.settle(monitor)
+        self.assertFalse(monitor.lights_action.isChecked())
 
     def test_startup_applies_the_remembered_state_before_the_first_reading(self) -> None:
         tray.save_lights_preference(False)
