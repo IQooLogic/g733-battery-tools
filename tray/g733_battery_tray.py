@@ -11,7 +11,6 @@ import statistics
 import sys
 import time
 from collections import deque
-from functools import partial
 from itertools import pairwise
 from pathlib import Path
 
@@ -269,8 +268,11 @@ class G733Tray:
         # The state the running lights request asks for, so its result can name it.
         self.lights_request = False
         self.lights_preference = load_lights_preference()
-        # True only while the startup restore runs, which the user did not ask
-        # for and which must not interleave with the first battery reading.
+        # The remembered state still has to be applied to the headset. It waits
+        # for a battery reading to succeed, which shows the headset is on: an
+        # autostarted monitor commonly begins before the headset is switched on.
+        self.lights_restore_pending = self.lights_preference is not None
+        # True only while that restore runs; the user did not ask for it.
         self.restoring_lights = False
         # When the headset is expected to answer battery requests again.
         self.lights_settle_until = 0.0
@@ -327,14 +329,8 @@ class G733Tray:
 
     def start(self) -> None:
         self.tray.show()
-        if self.lights_preference is None:
-            QTimer.singleShot(0, self.refresh)
-            return
-        # Applied before the first reading rather than beside it, so the reading
-        # does not land inside the window a lights write opens. The first
-        # reading follows as soon as the restore settles.
-        self.restoring_lights = True
-        QTimer.singleShot(0, partial(self.set_lights, self.lights_preference))
+        # Any remembered lights state follows the first reading that succeeds.
+        QTimer.singleShot(0, self.refresh)
 
     def schedule_next_poll(self) -> None:
         # A recent lights write both holds the next reading back and brings it
@@ -393,12 +389,23 @@ class G733Tray:
         self.lights_action.setText(LIGHTS_LABEL)
         self.update_lights_check()
 
-    def settle_lights_request(self) -> None:
-        """Start the first battery reading once a startup restore has ended."""
+    def restore_lights_if_pending(self) -> None:
+        """Apply the remembered state, once the headset has answered a reading."""
+        if not self.lights_restore_pending:
+            return
+        # A request the user started is running; it decides the state instead.
+        if self.lights_process.state() != QProcess.ProcessState.NotRunning:
+            return
+        self.lights_restore_pending = False
+        self.restoring_lights = True
+        self.set_lights(self.lights_preference)
+
+    def end_lights_restore(self, succeeded: bool) -> None:
+        """Close a restore; one that failed waits for the next good reading."""
         if not self.restoring_lights:
             return
         self.restoring_lights = False
-        self.schedule_next_poll()
+        self.lights_restore_pending = not succeeded
 
     def update_lights_check(self) -> None:
         """Tick the Lights item when the remembered state is on."""
@@ -406,6 +413,9 @@ class G733Tray:
 
     def remember_lights(self, on: bool) -> None:
         self.lights_preference = on
+        # The headset now has the state the user chose, so a restore still
+        # waiting would only apply an older one.
+        self.lights_restore_pending = False
         save_lights_preference(on)
         self.update_lights_check()
 
@@ -418,7 +428,8 @@ class G733Tray:
         output = bytes(self.lights_process.readAllStandardOutput()).decode(errors="replace").strip()
         state = self.lights_state()
         self.finish_lights_request()
-        if exit_code != 0:
+        succeeded = exit_code == 0
+        if not succeeded:
             details = error_output or output or f"headset tool exited with {exit_code}"
             self.report_lights_failure(f"Could not turn the G733 lights {state}: {details}")
         else:
@@ -429,7 +440,7 @@ class G733Tray:
             # A restore applies what is already stored; only a choice is saved.
             if not self.restoring_lights:
                 self.remember_lights(self.lights_request)
-        self.settle_lights_request()
+        self.end_lights_restore(succeeded)
 
     def lights_error(self, error: QProcess.ProcessError) -> None:
         if self.quitting:
@@ -439,7 +450,7 @@ class G733Tray:
             self.report_lights_failure(
                 f"Could not start the headset tool: {self.lights_process.errorString()}"
             )
-            self.settle_lights_request()
+            self.end_lights_restore(succeeded=False)
 
     def lights_timed_out(self) -> None:
         if self.lights_process.state() == QProcess.ProcessState.NotRunning:
@@ -448,7 +459,7 @@ class G733Tray:
         self.lights_process.kill()
         self.finish_lights_request()
         self.report_lights_failure(f"Turning the G733 lights {state} timed out")
-        self.settle_lights_request()
+        self.end_lights_restore(succeeded=False)
 
     def report_lights_failure(self, message: str) -> None:
         # Notified rather than shown on the icon: the battery reading is still
@@ -458,8 +469,8 @@ class G733Tray:
         # the battery, and that reading is still valid.
         self.lights_fault = message
         self.apply_status()
-        # A startup restore raises no notification. The user pressed nothing,
-        # and an autostarted monitor commonly begins with the headset off.
+        # A restore raises no notification: the user pressed nothing, and it is
+        # tried again after the next reading that succeeds.
         if not self.restoring_lights:
             self.tray.showMessage("G733 lights", message, QSystemTrayIcon.MessageIcon.Warning)
 
@@ -491,6 +502,9 @@ class G733Tray:
             self.show_error(f"G733 battery unavailable: unreadable headset tool output: {exc}")
             return
         self.show_reading(state, voltage_mv)
+        # The headset has just answered, so a remembered lights state that could
+        # not be applied yet can be now.
+        self.restore_lights_if_pending()
 
     def process_error(self, error: QProcess.ProcessError) -> None:
         if self.quitting:

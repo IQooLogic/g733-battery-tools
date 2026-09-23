@@ -5,7 +5,7 @@ Plasma system tray. Its icon contains the estimated percentage, coloured by
 charge level, and turns blue with a lightning bolt while the headset is on the
 cable. Its tooltip adds the battery voltage the estimate came from. Its context
 menu can also switch the headset lights on or off, and applies the last state
-you chose each time it starts.
+you chose each time it starts, as soon as the headset answers.
 
 Both the battery and the lights go through
 [`g733_headset.py`](g733_headset.py), which talks HID++ to the headset
@@ -177,10 +177,15 @@ somewhat high.
   runs, and the request uses its own process, so it does not cancel the
   current battery reading.
 - The state you choose is remembered, and the tick shows it. The tick changes
-  only after the headset has accepted the request. The state is applied again
-  each time the monitor starts, which restores it after the headset has been
-  powered off and on. With nothing remembered yet, the item is unticked and
-  the first click turns the lights on.
+  only after the headset has accepted the request. With nothing remembered
+  yet, the item is unticked and the first click turns the lights on.
+- The remembered state is applied again each time the monitor starts, once a
+  battery reading has succeeded, since that shows the headset is on. If the
+  headset is off when the monitor starts, as it often is for an autostarted
+  monitor, the state waits and is applied after the first reading that
+  succeeds once you switch the headset on. A restore that fails is tried again
+  after the next successful reading. A click on **Lights** replaces a restore
+  that is still waiting.
 - The remembered state is stored in:
 
   ```text
@@ -197,8 +202,8 @@ somewhat high.
 - A failed lights request is logged, notified, and then kept in the tooltip and
   under the Lights item until a lights request succeeds. It is deliberately not
   put on the icon: the icon reports the battery, and that reading is still
-  valid. The restore at startup is not notified — the headset is commonly off
-  when an autostarted monitor begins, and you pressed nothing to cause it.
+  valid. A failed restore is not notified: you pressed nothing to cause it,
+  and it is tried again after the next successful reading.
 - Each battery reading and lights request has a 15-second timeout. A failed
   battery reading is retried at the next interval; a failed lights request is
   not retried, so click **Lights** again.

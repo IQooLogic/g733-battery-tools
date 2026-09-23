@@ -113,13 +113,24 @@ class StubCommandMixin:
         battery_error: str = "",
         lights_exit: int = 0,
         lights_error: str = "",
+        switched_on: Path | None = None,
     ) -> str:
-        """Return a stub that prints `battery` for "battery" and exits for "lights"."""
+        """Return a stub that prints `battery` for "battery" and exits for "lights".
+
+        With `switched_on`, battery readings fail as a headset that is off does
+        until that file exists.
+        """
         path = Path(self._tmp.name) / "g733-headset"
+        headset_off = (
+            ""
+            if switched_on is None
+            else f"  [[ -e {switched_on} ]] || {{ echo 'no answer' >&2; exit 1; }}\n"
+        )
         path.write_text(
             "#!/usr/bin/env bash\n"
             f"printf '%s\\n' \"$*\" >> {self.record}\n"
             'if [[ "$1" == battery ]]; then\n'
+            f"{headset_off}"
             f"  cat <<'JSON'\n{battery}\nJSON\n"
             f"  [[ -n {battery_error!r} ]] && echo {battery_error!r} >&2\n"
             f"  exit {battery_exit}\n"
@@ -427,14 +438,37 @@ class LightsMemoryTests(StubCommandMixin, unittest.TestCase):
             self.settle(monitor)
         self.assertFalse(monitor.lights_action.isChecked())
 
-    def test_startup_applies_the_remembered_state_before_the_first_reading(self) -> None:
+    def test_startup_applies_the_remembered_state_after_the_first_reading(self) -> None:
+        # A reading that succeeds shows the headset is on; the lights follow it.
         tray.save_lights_preference(False)
         monitor = self.monitor(self.tool())
-        ran = self.run_startup(monitor)
-        # The lights request runs first; the battery reading follows it rather
-        # than landing inside the window the write opens, in which the headset
-        # gave no usable battery reading for about two seconds.
-        self.assertEqual(ran[:2], ["lights off", "battery"])
+        self.assertEqual(self.run_startup(monitor)[:2], ["battery", "lights off"])
+
+    def test_a_headset_that_is_off_at_startup_gets_its_lights_once_it_answers(self) -> None:
+        tray.save_lights_preference(False)
+        switched_on = Path(self._tmp.name) / "switched-on"
+        monitor = self.monitor(self.tool(switched_on=switched_on))
+        with self.assertLogs(tray.LOGGER, level="ERROR"):
+            self.run_startup(monitor)
+            monitor.refresh()
+            self.settle(monitor)
+        # Nothing is sent to a headset that has not answered.
+        self.assertEqual(self.ran(), ["battery", "battery"])
+        self.assertTrue(monitor.lights_restore_pending)
+
+        switched_on.touch()
+        monitor.refresh()
+        self.settle(monitor)
+        self.assertEqual(self.ran()[2:], ["battery", "lights off"])
+        self.assertFalse(monitor.lights_restore_pending)
+
+    def test_a_restore_is_applied_once(self) -> None:
+        tray.save_lights_preference(False)
+        monitor = self.monitor(self.tool())
+        self.run_startup(monitor)
+        monitor.refresh()
+        self.settle(monitor)
+        self.assertEqual(self.ran().count("lights off"), 1)
 
     def test_startup_without_a_remembered_state_only_reads_the_battery(self) -> None:
         monitor = self.monitor(self.tool())
@@ -456,8 +490,8 @@ class LightsMemoryTests(StubCommandMixin, unittest.TestCase):
         self.assertLess(remaining, monitor.interval_ms)
 
     def test_a_failed_restore_is_logged_but_not_notified(self) -> None:
-        # The headset is commonly off when an autostarted monitor begins; that
-        # must not open a notification the user did nothing to cause.
+        # The user pressed nothing, and the restore is tried again after the
+        # next reading, so it must not open a notification.
         tray.save_lights_preference(True)
         monitor = self.monitor(self.tool(lights_exit=1))
         with (
@@ -469,14 +503,33 @@ class LightsMemoryTests(StubCommandMixin, unittest.TestCase):
         self.assertIn("lights on", logged.output[0])
         notified.assert_not_called()
 
-    def test_a_failed_restore_still_reads_the_battery(self) -> None:
+    def test_a_failed_restore_is_tried_again_after_the_next_reading(self) -> None:
         tray.save_lights_preference(True)
         monitor = self.monitor(self.tool(lights_exit=1))
         with self.assertLogs(tray.LOGGER, level="ERROR"):
-            self.assertIn("battery", self.run_startup(monitor))
+            self.run_startup(monitor)
+            self.assertTrue(monitor.lights_restore_pending)
+            monitor.refresh()
+            self.settle(monitor)
+        self.assertEqual(self.ran(), ["battery", "lights on", "battery", "lights on"])
 
-    def test_a_restore_that_cannot_start_still_schedules_the_battery(self) -> None:
-        # Nothing runs, so the poll must still be scheduled rather than lost.
+    def test_a_choice_replaces_a_restore_that_is_still_waiting(self) -> None:
+        # The headset got what the user chose; the older state must not follow.
+        tray.save_lights_preference(True)
+        switched_on = Path(self._tmp.name) / "switched-on"
+        monitor = self.monitor(self.tool(switched_on=switched_on))
+        with self.assertLogs(tray.LOGGER, level="ERROR"):
+            self.run_startup(monitor)
+        monitor.set_lights(False)
+        self.settle(monitor)
+        switched_on.touch()
+        monitor.refresh()
+        self.settle(monitor)
+        self.assertEqual(self.ran(), ["battery", "lights off", "battery"])
+
+    def test_a_tool_that_cannot_start_still_schedules_the_next_reading(self) -> None:
+        # Nothing runs, so the poll must still be scheduled rather than lost,
+        # and the remembered state keeps waiting for a reading to succeed.
         tray.save_lights_preference(True)
         monitor = self.monitor("/nonexistent/g733-headset")
         with self.assertLogs(tray.LOGGER, level="ERROR") as logged:
@@ -484,6 +537,7 @@ class LightsMemoryTests(StubCommandMixin, unittest.TestCase):
             self.settle(monitor)
         self.assertTrue(any("Could not start the headset tool" in line for line in logged.output))
         self.assertTrue(monitor.poll_timer.isActive())
+        self.assertTrue(monitor.lights_restore_pending)
 
     def test_an_absent_state_file_is_not_an_error(self) -> None:
         self.assertIsNone(tray.load_lights_preference())
