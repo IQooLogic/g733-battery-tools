@@ -33,6 +33,12 @@ From this directory:
 ./start.sh
 ```
 
+At startup, the monitor waits up to 30 seconds for the G733 USB receiver's
+HID++ interface. It exits quietly if the receiver does not appear, rather than
+leaving an idle tray process running. The receiver can be present while the
+wireless headset is off or out of range; that is normal and the monitor keeps
+running in that case.
+
 The tray icon starts as `?`, then immediately takes its first reading and
 updates. The number inside it is the estimated battery percentage; while the
 headset charges, the icon shows a bolt instead. Left-click or double-click the

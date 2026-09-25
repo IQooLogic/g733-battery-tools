@@ -11,6 +11,7 @@ import statistics
 import sys
 import time
 from collections import deque
+from collections.abc import Callable
 from itertools import pairwise
 from pathlib import Path
 
@@ -28,6 +29,8 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
+from g733_headset import HeadsetError, ReceiverNotFound, find_device
+
 # The script beside this one talks HID++ to the headset, for both the battery
 # and the lights. It runs as its own process so a headset that does not answer
 # can be timed out and killed without blocking the tray.
@@ -36,6 +39,8 @@ LIGHTS_LABEL = "Lights"
 LOW_BATTERY_PERCENT = 20
 LOW_BATTERY_RESET_PERCENT = 25
 MINIMUM_INTERVAL_SECONDS = 5
+RECEIVER_WAIT_SECONDS = 30
+RECEIVER_POLL_SECONDS = 1
 REQUEST_TIMEOUT_MS = 15_000
 # Measured on the G733 when HeadsetControl switched the lights: for about two
 # seconds afterwards it got no usable battery reading. A reading taken inside
@@ -138,6 +143,31 @@ def parse_arguments() -> int:
         )
         raise SystemExit(2)
     return interval
+
+
+def wait_for_receiver(
+    wait_seconds: float = RECEIVER_WAIT_SECONDS,
+    poll_seconds: float = RECEIVER_POLL_SECONDS,
+    finder: Callable[[], Path] = find_device,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> bool:
+    """Wait briefly for the receiver's HID++ interface without opening it.
+
+    USB devices can appear after the desktop autostarts. Once this bounded wait
+    expires, a later receiver connection should launch the monitor via a
+    device-triggered service rather than leave an idle tray process running.
+    """
+    deadline = monotonic() + wait_seconds
+    while True:
+        try:
+            finder()
+            return True
+        except ReceiverNotFound:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                return False
+            sleep(min(poll_seconds, remaining))
 
 
 def g733_playback_is_active(snapshot: object) -> bool:
@@ -848,6 +878,15 @@ def main() -> int:
     # SIGINT while idle; PyQt6 then aborts once the exception escapes a slot.
     # The default handler makes Ctrl-C terminate immediately and quietly.
     signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+    try:
+        receiver_found = wait_for_receiver()
+    except HeadsetError as exc:
+        print(f"Could not inspect the G733 receiver: {exc}", file=sys.stderr)
+        return 1
+    if not receiver_found:
+        print("G733 receiver did not appear within 30 seconds; exiting.", file=sys.stderr)
+        return 0
 
     app = QApplication(sys.argv)
     app.setApplicationName("G733 Battery")

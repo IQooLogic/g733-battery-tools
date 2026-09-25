@@ -109,6 +109,10 @@ class HeadsetUnavailable(HeadsetError):
     """The receiver is present but the headset did not answer."""
 
 
+class ReceiverNotFound(HeadsetError):
+    """The G733 receiver's HID++ interface is not connected yet."""
+
+
 def matches_g733(uevent: str) -> bool:
     """Return whether a hidraw uevent describes the G733 receiver."""
     for line in uevent.splitlines():
@@ -138,7 +142,7 @@ def find_device(sysfs: Path = SYSFS_HIDRAW) -> Path:
             raise HeadsetError(f"could not inspect {node}: {exc}") from exc
         if LONG_REPORT_DESCRIPTOR_ITEM in descriptor:
             return Path("/dev") / node.name
-    raise HeadsetError(
+    raise ReceiverNotFound(
         f"G733 receiver {VENDOR_ID:04x}:{PRODUCT_ID:04x} not found; is it plugged in?"
     )
 

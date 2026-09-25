@@ -881,6 +881,53 @@ class ShutdownTests(StubCommandMixin, unittest.TestCase):
         logged.assert_not_called()
 
 
+class ReceiverWaitTests(unittest.TestCase):
+    def test_returns_immediately_when_the_receiver_is_present(self) -> None:
+        sleeps: list[float] = []
+        self.assertTrue(
+            tray.wait_for_receiver(
+                finder=lambda: Path("/dev/hidraw7"),
+                sleep=sleeps.append,
+            )
+        )
+        self.assertEqual(sleeps, [])
+
+    def test_waits_for_a_receiver_that_appears(self) -> None:
+        attempts = iter((tray.ReceiverNotFound("not found"), Path("/dev/hidraw7")))
+        sleeps: list[float] = []
+
+        def finder() -> Path:
+            result = next(attempts)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        self.assertTrue(
+            tray.wait_for_receiver(
+                finder=finder,
+                sleep=sleeps.append,
+                monotonic=lambda: 10,
+            )
+        )
+        self.assertEqual(sleeps, [tray.RECEIVER_POLL_SECONDS])
+
+    def test_returns_false_once_the_receiver_wait_expires(self) -> None:
+        clock = iter((0, 30))
+        self.assertFalse(
+            tray.wait_for_receiver(
+                finder=lambda: (_ for _ in ()).throw(tray.ReceiverNotFound("not found")),
+                sleep=lambda _seconds: self.fail("must not sleep after the deadline"),
+                monotonic=lambda: next(clock),
+            )
+        )
+
+    def test_propagates_an_unexpected_inspection_error(self) -> None:
+        with self.assertRaisesRegex(tray.HeadsetError, "cannot inspect"):
+            tray.wait_for_receiver(
+                finder=lambda: (_ for _ in ()).throw(tray.HeadsetError("cannot inspect"))
+            )
+
+
 class ArgumentTests(unittest.TestCase):
     def parse(self, argv: list[str], **env: str) -> int:
         """Parse one command line, capturing whatever it printed as self.output."""
