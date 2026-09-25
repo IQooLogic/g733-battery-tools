@@ -41,6 +41,10 @@ REQUEST_TIMEOUT_MS = 15_000
 # seconds afterwards it got no usable battery reading. A reading taken inside
 # that window would show a false "!", so readings are held off and then retried.
 LIGHTS_SETTLE_MS = 3_000
+# g733_headset.py uses this exit status when its receiver is present but the
+# headset does not answer. That normally means it is off or out of range, not
+# that the monitor has failed.
+HEADSET_UNAVAILABLE_EXIT = 3
 
 # The battery states the headset tool reports. It exits with an error for
 # anything else.
@@ -551,6 +555,9 @@ class G733Tray:
         output = bytes(self.process.readAllStandardOutput()).decode(errors="replace")
         error_output = bytes(self.process.readAllStandardError()).decode(errors="replace").strip()
         self.finish_request()
+        if exit_code == HEADSET_UNAVAILABLE_EXIT:
+            self.show_headset_unavailable()
+            return
         if exit_code != 0:
             details = error_output or f"headset tool exited with {exit_code}"
             self.show_error(f"G733 battery unavailable: {details}")
@@ -639,6 +646,14 @@ class G733Tray:
             # Re-armed only once the headset leaves the cable, so a headset left
             # on it, which may top up and finish again, is announced once.
             self.full_battery_notified = False
+
+    def show_headset_unavailable(self) -> None:
+        """Show an offline headset as an expected idle state, not a fault."""
+        self.voltages.clear()
+        self.last_error = None
+        self.tray.setIcon(icon_for(None))
+        self.status_text = "G733 headset is off or out of range"
+        self.apply_status()
 
     def show_error(self, message: str) -> None:
         # Deduplicated because a persistent fault would otherwise write one line

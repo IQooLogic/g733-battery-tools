@@ -125,7 +125,10 @@ class StubCommandMixin:
         headset_off = (
             ""
             if switched_on is None
-            else f"  [[ -e {switched_on} ]] || {{ echo 'no answer' >&2; exit 1; }}\n"
+            else (
+                f"  [[ -e {switched_on} ]] || {{ echo 'no answer' >&2; "
+                f"exit {tray.HEADSET_UNAVAILABLE_EXIT}; }}\n"
+            )
         )
         path.write_text(
             "#!/usr/bin/env bash\n"
@@ -172,9 +175,15 @@ class BatteryStateTests(StubCommandMixin, unittest.TestCase):
         text = self.read_payload("", exit_code=1, error="no answer from the headset within 2s")
         self.assertEqual(text, "G733 battery unavailable: no answer from the headset within 2s")
 
+    def test_an_offline_headset_is_not_shown_as_an_error(self) -> None:
+        text = self.read_payload(
+            "", exit_code=tray.HEADSET_UNAVAILABLE_EXIT, error="no answer from the headset"
+        )
+        self.assertEqual(text, "G733 headset is off or out of range")
+
     def test_a_failure_without_a_message_reports_its_status(self) -> None:
-        text = self.read_payload("", exit_code=3)
-        self.assertEqual(text, "G733 battery unavailable: headset tool exited with 3")
+        text = self.read_payload("", exit_code=4)
+        self.assertEqual(text, "G733 battery unavailable: headset tool exited with 4")
 
     def test_unparseable_output_is_reported(self) -> None:
         cases = {
@@ -453,10 +462,9 @@ class LightsMemoryTests(StubCommandMixin, unittest.TestCase):
         tray.save_lights_preference(False)
         switched_on = Path(self._tmp.name) / "switched-on"
         monitor = self.monitor(self.tool(switched_on=switched_on))
-        with self.assertLogs(tray.LOGGER, level="ERROR"):
-            self.run_startup(monitor)
-            monitor.refresh()
-            self.settle(monitor)
+        self.run_startup(monitor)
+        monitor.refresh()
+        self.settle(monitor)
         # Nothing is sent to a headset that has not answered.
         self.assertEqual(self.ran(), ["battery", "battery"])
         self.assertTrue(monitor.lights_restore_pending)
@@ -524,8 +532,7 @@ class LightsMemoryTests(StubCommandMixin, unittest.TestCase):
         tray.save_lights_preference(True)
         switched_on = Path(self._tmp.name) / "switched-on"
         monitor = self.monitor(self.tool(switched_on=switched_on))
-        with self.assertLogs(tray.LOGGER, level="ERROR"):
-            self.run_startup(monitor)
+        self.run_startup(monitor)
         monitor.set_lights(False)
         self.settle(monitor)
         switched_on.touch()

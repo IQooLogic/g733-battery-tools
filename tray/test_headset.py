@@ -116,9 +116,9 @@ class RequestTests(unittest.TestCase):
         with self.assertRaisesRegex(headset.HeadsetError, r"0x08 \(busy\)"):
             headset.request(fake.fd, ADC_INDEX, 0)
 
-    def test_silence_is_reported_as_a_timeout(self) -> None:
+    def test_silence_reports_an_unavailable_headset(self) -> None:
         fake = FakeHeadset(self, [[]])
-        with self.assertRaisesRegex(headset.HeadsetError, "no answer"):
+        with self.assertRaisesRegex(headset.HeadsetUnavailable, "no answer"):
             headset.request(fake.fd, ADC_INDEX, 0, timeout=0.2)
 
     def test_a_headset_without_the_feature_is_reported(self) -> None:

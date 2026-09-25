@@ -161,11 +161,12 @@ somewhat high.
 - A "fully charged" notification is sent once when the headset reports that
   charging has finished. It is sent again only after the headset has been off
   the cable, so a headset left charging overnight is announced once.
-- A grey `!` means something went wrong: the headset is off or out of range, or
-  the headset tool failed. Hover the icon for what happened. The `!` is
-  replaced by the battery reading as soon as one succeeds again.
-- A grey `?` means no reading has completed yet, which is the state the monitor
-  starts in.
+- A grey `?` means either no reading has completed yet or the receiver cannot
+  reach the headset. The latter is the expected state while it is off or out of
+  range; the tooltip says so and it is retried at the next interval.
+- A grey `!` means the receiver or headset tool failed. Hover the icon for what
+  happened. The `!` is replaced by the battery reading as soon as one succeeds
+  again.
 - Errors are also written to standard error, so an autostarted monitor can be
   diagnosed by redirecting its output to a log file. A repeated error is logged
   once, and recovery is logged when a reading succeeds again.

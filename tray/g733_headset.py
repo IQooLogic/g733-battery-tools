@@ -45,6 +45,9 @@ HIDPP20_ERROR = 0xFF
 # "Report ID 0x11" in a HID report descriptor: the interface that speaks HID++.
 LONG_REPORT_DESCRIPTOR_ITEM = bytes([0x85, HIDPP_LONG_REPORT])
 REPLY_TIMEOUT_SECONDS = 2.0
+# A receiver can remain connected while its headset is switched off or out of
+# range. Keep that expected condition distinct from a receiver/tool failure.
+HEADSET_UNAVAILABLE_EXIT = 3
 
 ROOT_FEATURE_INDEX = 0x00
 ADC_MEASUREMENT_FEATURE = 0x1F20
@@ -96,6 +99,10 @@ UDEV_HINT = (
 
 class HeadsetError(Exception):
     """A request to the headset failed; the message says why."""
+
+
+class HeadsetUnavailable(HeadsetError):
+    """The receiver is present but the headset did not answer."""
 
 
 def matches_g733(uevent: str) -> bool:
@@ -160,7 +167,9 @@ def request(
             code = reply[5]
             name = HIDPP20_ERRORS.get(code, "unrecognised error")
             raise HeadsetError(f"headset answered with HID++ error 0x{code:02x} ({name})")
-    raise HeadsetError(f"no answer from the headset within {timeout:g}s; is it switched on?")
+    raise HeadsetUnavailable(
+        f"no answer from the headset within {timeout:g}s; is it switched on?"
+    )
 
 
 def feature_index(fd: int, feature: int, name: str) -> int:
@@ -273,7 +282,7 @@ def main(argv: list[str] | None = None) -> int:
             os.close(fd)
     except HeadsetError as exc:
         print(exc, file=sys.stderr)
-        return 1
+        return HEADSET_UNAVAILABLE_EXIT if isinstance(exc, HeadsetUnavailable) else 1
     print(json.dumps(result))
     return 0
 
