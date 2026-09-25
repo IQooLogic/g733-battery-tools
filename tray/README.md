@@ -33,10 +33,10 @@ From this directory:
 ./start.sh
 ```
 
-The tray icon starts as `?`, then updates after its first reading. The number
-inside it is the estimated battery percentage; while the headset charges, the
-icon shows a bolt instead. Left-click or double-click the icon for an
-immediate refresh; right-click for Refresh now, Lights and Quit.
+The tray icon starts as `?`, then immediately takes its first reading and
+updates. The number inside it is the estimated battery percentage; while the
+headset charges, the icon shows a bolt instead. Left-click or double-click the
+icon for an immediate refresh; right-click for Refresh now, Lights and Quit.
 
 `./start.sh` runs the monitor in the foreground, so its terminal stays occupied
 until you use the tray's **Quit** action. Quit returns you to the shell without
@@ -72,7 +72,9 @@ unknown argument.
 
 ## Idle-aware polling
 
-Automatic battery reads run only while PipeWire reports an active playback
+The monitor takes one battery reading immediately when it starts, so an
+autostarted tray icon does not remain at “waiting for first reading”. Later
+automatic battery reads run only while PipeWire reports an active playback
 link into the G733. When nothing is playing, the monitor stops sending HID++
 requests, allowing the headset's own inactivity timer to power it off. Its
 tooltip says that polling is paused. It checks PipeWire again every five

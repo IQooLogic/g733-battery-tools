@@ -281,11 +281,20 @@ class IdleAwarePollingTests(StubCommandMixin, unittest.TestCase):
         }
         self.assertFalse(tray.g733_playback_is_active([self.SINK, inactive_link]))
 
-    def test_no_active_audio_pauses_automatic_hid_polling(self) -> None:
+    def test_no_active_audio_pauses_later_automatic_hid_polling(self) -> None:
         monitor = self.monitor([self.SINK])
         monitor.start()
+        # Startup always obtains one reading, so the icon does not remain on
+        # "waiting for first reading" forever when no audio is playing.
+        self.wait_for(lambda: "battery" in self.ran(), "initial battery request was not started")
+        self.wait_for(lambda: not monitor.in_flight, "initial battery request did not finish")
+        self.assertEqual(self.ran().count("battery"), 1)
+
+        # The next ordinary automatic poll checks PipeWire and pauses without
+        # another HID request while there is no G733 playback.
+        monitor.refresh(manual=False)
         self.wait_for(lambda: monitor.polling_paused, "PipeWire activity check did not finish")
-        self.assertEqual(self.ran(), [])
+        self.assertEqual(self.ran().count("battery"), 1)
         self.assertIn("polling paused", monitor.tray.toolTip())
         self.assertGreater(monitor.poll_timer.remainingTime(), 0)
         self.assertLessEqual(monitor.poll_timer.remainingTime(), tray.IDLE_ACTIVITY_CHECK_MS * 1.5)
@@ -300,9 +309,12 @@ class IdleAwarePollingTests(StubCommandMixin, unittest.TestCase):
     def test_manual_refresh_bypasses_the_paused_policy(self) -> None:
         monitor = self.monitor([self.SINK])
         monitor.start()
+        self.wait_for(lambda: "battery" in self.ran(), "initial battery request was not started")
+        self.wait_for(lambda: not monitor.in_flight, "initial battery request did not finish")
+        monitor.refresh(manual=False)
         self.wait_for(lambda: monitor.polling_paused, "PipeWire activity check did not finish")
         monitor.refresh()
-        self.wait_for(lambda: "battery" in self.ran(), "manual refresh did not start")
+        self.wait_for(lambda: self.ran().count("battery") == 2, "manual refresh did not start")
 
 
 class SmoothingTests(StubCommandMixin, unittest.TestCase):

@@ -410,8 +410,11 @@ class G733Tray:
 
     def start(self) -> None:
         self.tray.show()
-        # Any remembered lights state follows the first reading that succeeds.
-        QTimer.singleShot(0, lambda: self.refresh(manual=False))
+        # Always take one initial reading.  Otherwise an autostarted monitor
+        # with no current audio link remains at "waiting for first reading"
+        # indefinitely, until the user clicks it.  Idle-aware policy applies
+        # to later automatic polls, after there is something to display.
+        QTimer.singleShot(0, lambda: self.refresh(manual=True))
 
     def schedule_next_poll(self) -> None:
         if self.polling_paused:
