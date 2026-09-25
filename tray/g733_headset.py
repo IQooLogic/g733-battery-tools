@@ -45,6 +45,10 @@ HIDPP20_ERROR = 0xFF
 # "Report ID 0x11" in a HID report descriptor: the interface that speaks HID++.
 LONG_REPORT_DESCRIPTOR_ITEM = bytes([0x85, HIDPP_LONG_REPORT])
 REPLY_TIMEOUT_SECONDS = 2.0
+# A receiver briefly reports HID++ "busy" while it is coming up after boot.
+# Retrying the same request inside its normal timeout avoids a false tray error
+# when the monitor is autostarted before the receiver has settled.
+BUSY_RETRY_DELAY_SECONDS = 0.1
 # A receiver can remain connected while its headset is switched off or out of
 # range. Keep that expected condition distinct from a receiver/tool failure.
 HEADSET_UNAVAILABLE_EXIT = 3
@@ -149,27 +153,35 @@ def request(
     """Send one HID++ 2.0 request and return the parameter bytes of its reply."""
     address = (function << 4) | SOFTWARE_ID
     packet = bytes([HIDPP_LONG_REPORT, DEVICE_INDEX, feature_index, address]) + params
-    os.write(fd, packet.ljust(HIDPP_LONG_LENGTH, b"\0"))
-
+    packet = packet.ljust(HIDPP_LONG_LENGTH, b"\0")
     deadline = time.monotonic() + timeout
+
     while (remaining := deadline - time.monotonic()) > 0:
-        ready, _, _ = select.select([fd], [], [], remaining)
-        if not ready:
-            break
-        reply = os.read(fd, 64)
-        # The node also delivers notifications and replies meant for other
-        # programs; only a reply that echoes this request is taken.
-        if len(reply) < 6:
-            continue
-        if reply[2] == feature_index and reply[3] == address:
-            return reply[4:]
-        if reply[2] == HIDPP20_ERROR and reply[3] == feature_index and reply[4] == address:
+        os.write(fd, packet)
+        while (remaining := deadline - time.monotonic()) > 0:
+            ready, _, _ = select.select([fd], [], [], remaining)
+            if not ready:
+                break
+            reply = os.read(fd, 64)
+            # The node also delivers notifications and replies meant for other
+            # programs; only a reply that echoes this request is taken.
+            if len(reply) < 6:
+                continue
+            if reply[2] == feature_index and reply[3] == address:
+                return reply[4:]
+            if reply[2] != HIDPP20_ERROR or reply[3] != feature_index or reply[4] != address:
+                continue
             code = reply[5]
+            if code == 0x08:
+                # Unlike the other HID++ errors, busy is transient. This is
+                # especially common while a USB receiver is initialising.
+                time.sleep(min(BUSY_RETRY_DELAY_SECONDS, max(0, deadline - time.monotonic())))
+                break
             name = HIDPP20_ERRORS.get(code, "unrecognised error")
             raise HeadsetError(f"headset answered with HID++ error 0x{code:02x} ({name})")
-    raise HeadsetUnavailable(
-        f"no answer from the headset within {timeout:g}s; is it switched on?"
-    )
+        else:
+            continue
+    raise HeadsetUnavailable(f"no answer from the headset within {timeout:g}s; is it switched on?")
 
 
 def feature_index(fd: int, feature: int, name: str) -> int:

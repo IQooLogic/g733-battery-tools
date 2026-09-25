@@ -111,9 +111,21 @@ class RequestTests(unittest.TestCase):
         )
         self.assertEqual(headset.request(fake.fd, ADC_INDEX, 0)[:3], bytes([0x0E, 0x10, 0x01]))
 
-    def test_an_error_reply_is_reported_by_name(self) -> None:
-        fake = FakeHeadset(self, [[error_reply(ADC_INDEX, 0, 0x08)]])
-        with self.assertRaisesRegex(headset.HeadsetError, r"0x08 \(busy\)"):
+    def test_a_busy_reply_is_retried_within_the_same_request(self) -> None:
+        fake = FakeHeadset(
+            self,
+            [
+                [error_reply(ADC_INDEX, 0, 0x08)],
+                [reply(ADC_INDEX, 0, bytes([0x0E, 0x10, 0x01]))],
+            ],
+        )
+        self.assertEqual(headset.request(fake.fd, ADC_INDEX, 0)[:3], bytes([0x0E, 0x10, 0x01]))
+        fake.thread.join(1)
+        self.assertEqual(len(fake.requests), 2)
+
+    def test_a_non_transient_error_reply_is_reported_by_name(self) -> None:
+        fake = FakeHeadset(self, [[error_reply(ADC_INDEX, 0, 0x02)]])
+        with self.assertRaisesRegex(headset.HeadsetError, r"0x02 \(invalid argument\)"):
             headset.request(fake.fd, ADC_INDEX, 0)
 
     def test_silence_reports_an_unavailable_headset(self) -> None:
