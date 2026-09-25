@@ -52,10 +52,11 @@ LIGHTS_SETTLE_MS = 3_000
 IDLE_ACTIVITY_CHECK_MS = 5_000
 ACTIVITY_QUERY_TIMEOUT_MS = 2_000
 PIPEWIRE_DUMP_COMMAND = "pw-dump"
-# These are the USB vendor/product IDs PipeWire exposes for the G733's ALSA
-# sink. They deliberately match the IDs used by g733_headset.py.
+# These match the IDs used by g733_headset.py. PipeWire may expose them as
+# device.vendor.id/device.product.id, or together in alsa.components.
 G733_VENDOR_ID = "0x046d"
 G733_PRODUCT_ID = "0x0b1f"
+G733_ALSA_COMPONENT = f"usb{G733_VENDOR_ID[2:]}:{G733_PRODUCT_ID[2:]}"
 # g733_headset.py uses this exit status when its receiver is present but the
 # headset does not answer. That normally means it is off or out of range, not
 # that the monitor has failed.
@@ -189,10 +190,23 @@ def g733_playback_is_active(snapshot: object) -> bool:
         props = info.get("props")
         if not isinstance(props, dict):
             continue
+        vendor_id = props.get("device.vendor.id")
+        product_id = props.get("device.product.id")
+        alsa_components = props.get("alsa.components")
+        matches_device_ids = (
+            isinstance(vendor_id, str)
+            and isinstance(product_id, str)
+            and vendor_id.lower() == G733_VENDOR_ID
+            and product_id.lower() == G733_PRODUCT_ID
+        )
+        # WirePlumber commonly leaves the USB IDs out of a sink's properties
+        # and puts them only in alsa.components, for example "USB046d:0b1f".
+        matches_alsa_component = (
+            isinstance(alsa_components, str) and G733_ALSA_COMPONENT in alsa_components.lower()
+        )
         if (
             props.get("media.class") == "Audio/Sink"
-            and props.get("device.vendor.id", "").lower() == G733_VENDOR_ID
-            and props.get("device.product.id", "").lower() == G733_PRODUCT_ID
+            and (matches_device_ids or matches_alsa_component)
             and isinstance(item.get("id"), int)
         ):
             g733_sinks.add(item["id"])

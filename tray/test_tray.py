@@ -230,8 +230,9 @@ class IdleAwarePollingTests(StubCommandMixin, unittest.TestCase):
         "info": {
             "props": {
                 "media.class": "Audio/Sink",
-                "device.vendor.id": "0x046d",
-                "device.product.id": "0x0b1f",
+                # This is how WirePlumber exposes the USB ID on its sink;
+                # device.vendor.id and device.product.id are absent.
+                "alsa.components": "USB046d:0b1f",
             }
         },
     }
@@ -280,6 +281,18 @@ class IdleAwarePollingTests(StubCommandMixin, unittest.TestCase):
             "info": {"state": "init", "input-node-id": 55},
         }
         self.assertFalse(tray.g733_playback_is_active([self.SINK, inactive_link]))
+
+    def test_pipewire_device_id_properties_are_also_supported(self) -> None:
+        sink = json.loads(json.dumps(self.SINK))
+        props = sink["info"]["props"]
+        del props["alsa.components"]
+        props["device.vendor.id"] = "0x046d"
+        props["device.product.id"] = "0x0b1f"
+        link = {
+            "type": "PipeWire:Interface:Link",
+            "info": {"state": "active", "input-node-id": 55},
+        }
+        self.assertTrue(tray.g733_playback_is_active([sink, link]))
 
     def test_no_active_audio_pauses_later_automatic_hid_polling(self) -> None:
         monitor = self.monitor([self.SINK])
