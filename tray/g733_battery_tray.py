@@ -267,7 +267,12 @@ class G733Tray:
         self.lights_fault: str | None = None
         # The state the running lights request asks for, so its result can name it.
         self.lights_request = False
+        self.lights_operation: str | None = None
         self.lights_preference = load_lights_preference()
+        # The preference is only a fallback until the headset reports its
+        # actual setting. A headset powered on after an autostart can reset it.
+        self.lights_on: bool | None = self.lights_preference
+        self.lights_status_pending = True
         # The remembered state still has to be applied to the headset. It waits
         # for a battery reading to succeed, which shows the headset is on: an
         # autostarted monitor commonly begins before the headset is switched on.
@@ -355,9 +360,9 @@ class G733Tray:
 
     def toggle_lights(self) -> None:
         """Ask for the state the Lights item is not showing."""
-        # With nothing remembered the item is unticked, so a click turns the
-        # lights on, as the unticked item suggests.
-        self.set_lights(self.lights_preference is not True)
+        # With no headset state yet, an unticked item still means a click asks
+        # for lights on.
+        self.set_lights(self.lights_on is not True)
 
     def set_lights(self, on: bool) -> None:
         """Ask the headset to switch its RGB lighting on or off."""
@@ -366,6 +371,7 @@ class G733Tray:
         if self.lights_process.state() != QProcess.ProcessState.NotRunning:
             return
         self.lights_request = on
+        self.lights_operation = "set"
         self.lights_action.setEnabled(False)
         # Clicking a checkable item toggles its tick; the tick must keep showing
         # the remembered state until this request succeeds.
@@ -378,8 +384,28 @@ class G733Tray:
         """Return "on" or "off" for the request that is running."""
         return "on" if self.lights_request else "off"
 
+    def read_lights_state_if_pending(self) -> None:
+        """Read the headset setting after it has answered a battery request."""
+        if not self.lights_status_pending:
+            return
+        if self.lights_process.state() != QProcess.ProcessState.NotRunning:
+            return
+        self.lights_operation = "status"
+        self.lights_action.setEnabled(False)
+        self.lights_action.setText("Checking lights…")
+        self.run_headset(self.lights_process, "lights", "status")
+        self.lights_timeout.start(REQUEST_TIMEOUT_MS)
+
+    def finish_lights_status_request(self) -> None:
+        self.lights_timeout.stop()
+        self.lights_operation = None
+        self.lights_action.setEnabled(True)
+        self.lights_action.setText(LIGHTS_LABEL)
+        self.update_lights_check()
+
     def finish_lights_request(self) -> None:
         self.lights_timeout.stop()
+        self.lights_operation = None
         self.lights_settle_until = time.monotonic() + LIGHTS_SETTLE_MS / 1000
         # A poll already counting down could otherwise land inside the window
         # the write just opened and report a battery that is only unreachable.
@@ -408,11 +434,12 @@ class G733Tray:
         self.lights_restore_pending = not succeeded
 
     def update_lights_check(self) -> None:
-        """Tick the Lights item when the remembered state is on."""
-        self.lights_action.setChecked(self.lights_preference is True)
+        """Tick the Lights item when the headset reports that it is on."""
+        self.lights_action.setChecked(self.lights_on is True)
 
     def remember_lights(self, on: bool) -> None:
         self.lights_preference = on
+        self.lights_on = on
         # The headset now has the state the user chose, so a restore still
         # waiting would only apply an older one.
         self.lights_restore_pending = False
@@ -426,6 +453,30 @@ class G733Tray:
             bytes(self.lights_process.readAllStandardError()).decode(errors="replace").strip()
         )
         output = bytes(self.lights_process.readAllStandardOutput()).decode(errors="replace").strip()
+        if self.lights_operation is None:
+            # The process was killed after a timeout; its late finished signal
+            # must not be mistaken for a completed lights write.
+            return
+        if self.lights_operation == "status":
+            self.finish_lights_status_request()
+            if exit_code != 0:
+                details = error_output or output or f"headset tool exited with {exit_code}"
+                LOGGER.error("Could not read the G733 lights state: %s", details)
+                return
+            try:
+                state = json.loads(output)["lights"]
+                if state not in {"on", "off"}:
+                    raise ValueError(f"invalid state {state!r}")
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                LOGGER.error(
+                    "Could not read the G733 lights state: unreadable headset tool output: %s", exc
+                )
+                return
+            self.lights_on = state == "on"
+            self.lights_status_pending = False
+            self.update_lights_check()
+            return
+
         state = self.lights_state()
         self.finish_lights_request()
         succeeded = exit_code == 0
@@ -440,12 +491,21 @@ class G733Tray:
             # A restore applies what is already stored; only a choice is saved.
             if not self.restoring_lights:
                 self.remember_lights(self.lights_request)
+            else:
+                self.lights_on = self.lights_request
+                self.update_lights_check()
         self.end_lights_restore(succeeded)
 
     def lights_error(self, error: QProcess.ProcessError) -> None:
         if self.quitting:
             return
         if error == QProcess.ProcessError.FailedToStart:
+            if self.lights_operation == "status":
+                self.finish_lights_status_request()
+                LOGGER.error(
+                    "Could not read the G733 lights state: %s", self.lights_process.errorString()
+                )
+                return
             self.finish_lights_request()
             self.report_lights_failure(
                 f"Could not start the headset tool: {self.lights_process.errorString()}"
@@ -455,8 +515,13 @@ class G733Tray:
     def lights_timed_out(self) -> None:
         if self.lights_process.state() == QProcess.ProcessState.NotRunning:
             return
+        operation = self.lights_operation
         state = self.lights_state()
         self.lights_process.kill()
+        if operation == "status":
+            self.finish_lights_status_request()
+            LOGGER.error("Reading the G733 lights state timed out")
+            return
         self.finish_lights_request()
         self.report_lights_failure(f"Turning the G733 lights {state} timed out")
         self.end_lights_restore(succeeded=False)
@@ -503,8 +568,12 @@ class G733Tray:
             return
         self.show_reading(state, voltage_mv)
         # The headset has just answered, so a remembered lights state that could
-        # not be applied yet can be now.
-        self.restore_lights_if_pending()
+        # not be applied yet can be now. Otherwise read its setting so a headset
+        # switched on after the monitor has the right menu tick.
+        if self.lights_restore_pending:
+            self.restore_lights_if_pending()
+        else:
+            self.read_lights_state_if_pending()
 
     def process_error(self, error: QProcess.ProcessError) -> None:
         if self.quitting:

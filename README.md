@@ -112,10 +112,12 @@ A failed reading prints its reason and the loop carries on.
 ```bash
 tray/g733_headset.py lights off
 tray/g733_headset.py lights on
+tray/g733_headset.py lights status
 ```
 
-`on` is a cyan breathing effect on both lighting zones. The tray monitor's menu
-does the same, and remembers the choice.
+`on` is a cyan breathing effect on both lighting zones. `status` prints whether
+the headset currently has its lights on or off. The tray monitor's menu does
+the same, and remembers the choice.
 
 ## Install and run the KDE tray monitor
 

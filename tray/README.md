@@ -176,9 +176,11 @@ somewhat high.
   headset's own list rather than assumed. The item is disabled while a request
   runs, and the request uses its own process, so it does not cancel the
   current battery reading.
-- The state you choose is remembered, and the tick shows it. The tick changes
-  only after the headset has accepted the request. With nothing remembered
-  yet, the item is unticked and the first click turns the lights on.
+- The state you choose is remembered. After the first successful battery
+  reading, the monitor also runs `g733_headset.py lights status` and the tick
+  shows the headset's actual setting. This corrects the tick when a headset is
+  powered on after the monitor and starts with its lights on. The tick changes
+  immediately after a successful lights request too.
 - The remembered state is applied again each time the monitor starts, once a
   battery reading has succeeded, since that shows the headset is on. If the
   headset is off when the monitor starts, as it often is for an autostarted
@@ -206,6 +208,7 @@ somewhat high.
   and it is tried again after the next successful reading.
 - Each battery reading and lights request has a 15-second timeout. A failed
   battery reading is retried at the next interval; a failed lights request is
-  not retried, so click **Lights** again.
+  not retried, so click **Lights** again. A failed startup status check is
+  retried after the next successful battery reading.
 
 [solaar]: https://github.com/pwr-Solaar/Solaar

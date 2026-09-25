@@ -4,7 +4,7 @@
 Usage:
 
     g733_headset.py battery
-    g733_headset.py lights on|off
+    g733_headset.py lights on|off|status
 
 Each command prints one JSON object on success and exits with status 0:
 
@@ -63,6 +63,10 @@ LED_GET_INFO = 0
 LED_GET_ZONE_INFO = 1
 LED_GET_ZONE_EFFECT_INFO = 2
 LED_SET_ZONE_EFFECT = 3
+# Available on COLOR_LED_EFFECTS v4 when its extended capabilities advertise
+# that the current setting can be read.
+LED_GET_ZONE_EFFECT = 14
+LED_INFO_HAS_ZONE_EFFECT = 0x0001
 EFFECT_DISABLED = 0x0000
 EFFECT_BREATHE = 0x000A
 # Breathe parameters: colour 0x00B6FF, a 4000 ms period, waveform 0 and
@@ -198,12 +202,38 @@ def effect_slot(fd: int, index: int, zone: int, effect_id: int) -> int:
     raise HeadsetError(f"LED zone {zone} has no effect 0x{effect_id:04x}")
 
 
-def set_lights(fd: int, on: bool) -> dict[str, object]:
-    """Set every LED zone to Breathe, or to Disabled."""
+def lights_info(fd: int) -> tuple[int, int, int]:
+    """Return the LED feature index, zone count, and extended capabilities."""
     index = feature_index(fd, COLOR_LED_EFFECTS_FEATURE, "LED effects")
-    zones = request(fd, index, LED_GET_INFO)[0]
+    info = request(fd, index, LED_GET_INFO)
+    zones = info[0]
     if zones == 0:
         raise HeadsetError("headset reports no LED zones")
+    # getInfo returns zone count, two bytes of NV capabilities, then two bytes
+    # of extended capabilities.
+    return index, zones, int.from_bytes(info[3:5], "big")
+
+
+def read_lights(fd: int) -> dict[str, object]:
+    """Return whether any LED zone is currently using an enabled effect."""
+    index, zones, capabilities = lights_info(fd)
+    if not capabilities & LED_INFO_HAS_ZONE_EFFECT:
+        raise HeadsetError("headset cannot report its current LED effect")
+
+    for zone in range(zones):
+        setting = request(fd, index, LED_GET_ZONE_EFFECT, bytes([zone]))
+        if setting[0] != zone:
+            raise HeadsetError(f"LED effect reply named zone {setting[0]}, expected {zone}")
+        # getZoneEffect returns the active effect id. Unlike setZoneEffect,
+        # this is not the effect's position in the zone's list.
+        if setting[1] != EFFECT_DISABLED:
+            return {"lights": "on"}
+    return {"lights": "off"}
+
+
+def set_lights(fd: int, on: bool) -> dict[str, object]:
+    """Set every LED zone to Breathe, or to Disabled."""
+    index, zones, _capabilities = lights_info(fd)
     effect_id = EFFECT_BREATHE if on else EFFECT_DISABLED
     for zone in range(zones):
         slot = effect_slot(fd, index, zone, effect_id)
@@ -215,8 +245,8 @@ def parse_arguments(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Talk to a Logitech G733 headset over HID++.")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("battery", help="print one battery reading")
-    lights = commands.add_parser("lights", help="switch the headset lights on or off")
-    lights.add_argument("state", choices=("on", "off"))
+    lights = commands.add_parser("lights", help="switch the headset lights, or print their state")
+    lights.add_argument("state", choices=("on", "off", "status"))
     return parser.parse_args(argv)
 
 
@@ -233,6 +263,8 @@ def main(argv: list[str] | None = None) -> int:
         try:
             if arguments.command == "battery":
                 result = read_battery(fd)
+            elif arguments.state == "status":
+                result = read_lights(fd)
             else:
                 result = set_lights(fd, arguments.state == "on")
         except OSError as exc:

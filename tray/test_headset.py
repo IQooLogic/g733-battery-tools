@@ -178,6 +178,27 @@ class LightsTests(unittest.TestCase):
         writes = self.zone_writes(self.lights(on=True, effects=(0x000A, 0x0000)))
         self.assertEqual([w[:2] for w in writes], [b"\x00\x00", b"\x01\x00"])
 
+    def test_status_reports_on_when_a_zone_has_an_enabled_effect(self) -> None:
+        answers = [
+            [reply(0x00, 0, bytes([LED_INDEX, 0x00, 0x00]))],
+            [reply(LED_INDEX, 0, bytes([0x02, 0x00, 0x00, 0x00, 0x01]))],
+            [reply(LED_INDEX, headset.LED_GET_ZONE_EFFECT, bytes([0x00, 0x0A]))],
+        ]
+        fake = FakeHeadset(self, answers)
+        self.assertEqual(headset.read_lights(fake.fd), {"lights": "on"})
+        fake.thread.join(1)
+
+    def test_status_reports_off_only_when_every_zone_is_disabled(self) -> None:
+        answers = [
+            [reply(0x00, 0, bytes([LED_INDEX, 0x00, 0x00]))],
+            [reply(LED_INDEX, 0, bytes([0x02, 0x00, 0x00, 0x00, 0x01]))],
+        ]
+        for zone in range(2):
+            answers.append([reply(LED_INDEX, headset.LED_GET_ZONE_EFFECT, bytes([zone, 0x00]))])
+        fake = FakeHeadset(self, answers)
+        self.assertEqual(headset.read_lights(fake.fd), {"lights": "off"})
+        fake.thread.join(1)
+
     def test_a_zone_without_the_effect_is_an_error(self) -> None:
         answers = [
             [reply(0x00, 0, bytes([LED_INDEX, 0x00, 0x00]))],
@@ -193,6 +214,7 @@ class CommandLineTests(unittest.TestCase):
     def test_the_commands_parse(self) -> None:
         self.assertEqual(headset.parse_arguments(["battery"]).command, "battery")
         self.assertEqual(headset.parse_arguments(["lights", "off"]).state, "off")
+        self.assertEqual(headset.parse_arguments(["lights", "status"]).state, "status")
 
     def test_an_unknown_lights_state_is_rejected(self) -> None:
         with (

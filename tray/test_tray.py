@@ -113,6 +113,7 @@ class StubCommandMixin:
         battery_error: str = "",
         lights_exit: int = 0,
         lights_error: str = "",
+        lights_state: str = "off",
         switched_on: Path | None = None,
     ) -> str:
         """Return a stub that prints `battery` for "battery" and exits for "lights".
@@ -134,6 +135,9 @@ class StubCommandMixin:
             f"  cat <<'JSON'\n{battery}\nJSON\n"
             f"  [[ -n {battery_error!r} ]] && echo {battery_error!r} >&2\n"
             f"  exit {battery_exit}\n"
+            "fi\n"
+            'if [[ "$2" == status ]]; then\n'
+            f"  printf '%s\\n' '{json.dumps({'lights': lights_state})}'\n"
             "fi\n"
             f"[[ -n {lights_error!r} ]] && echo {lights_error!r} >&2\n"
             f"exit {lights_exit}\n"
@@ -306,6 +310,7 @@ class LightsTests(StubCommandMixin, unittest.TestCase):
                 self.record.unlink(missing_ok=True)
                 monitor = self.monitor(self.tool())
                 monitor.lights_preference = remembered
+                monitor.lights_on = remembered
                 monitor.lights_action.trigger()
                 self.wait_for_lights(monitor)
                 self.assertEqual(self.ran(), [expected])
@@ -470,11 +475,12 @@ class LightsMemoryTests(StubCommandMixin, unittest.TestCase):
         self.settle(monitor)
         self.assertEqual(self.ran().count("lights off"), 1)
 
-    def test_startup_without_a_remembered_state_only_reads_the_battery(self) -> None:
-        monitor = self.monitor(self.tool())
+    def test_startup_without_a_remembered_state_reads_the_headset_lights_state(self) -> None:
+        monitor = self.monitor(self.tool(lights_state="on"))
         monitor.start()
         self.settle(monitor)
-        self.assertEqual(self.ran(), ["battery"])
+        self.assertEqual(self.ran(), ["battery", "lights status"])
+        self.assertTrue(monitor.lights_action.isChecked())
 
     def test_a_lights_write_holds_the_next_reading_back_then_brings_it_forward(self) -> None:
         monitor = self.monitor(self.tool())
@@ -525,7 +531,7 @@ class LightsMemoryTests(StubCommandMixin, unittest.TestCase):
         switched_on.touch()
         monitor.refresh()
         self.settle(monitor)
-        self.assertEqual(self.ran(), ["battery", "lights off", "battery"])
+        self.assertEqual(self.ran(), ["battery", "lights off", "battery", "lights status"])
 
     def test_a_tool_that_cannot_start_still_schedules_the_next_reading(self) -> None:
         # Nothing runs, so the poll must still be scheduled rather than lost,
