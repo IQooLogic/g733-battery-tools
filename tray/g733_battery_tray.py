@@ -41,6 +41,16 @@ REQUEST_TIMEOUT_MS = 15_000
 # seconds afterwards it got no usable battery reading. A reading taken inside
 # that window would show a false "!", so readings are held off and then retried.
 LIGHTS_SETTLE_MS = 3_000
+# While no application is playing through the G733, check PipeWire frequently
+# enough to notice playback starting, but never contact the headset. This lets
+# its own inactivity timer switch it off.
+IDLE_ACTIVITY_CHECK_MS = 5_000
+ACTIVITY_QUERY_TIMEOUT_MS = 2_000
+PIPEWIRE_DUMP_COMMAND = "pw-dump"
+# These are the USB vendor/product IDs PipeWire exposes for the G733's ALSA
+# sink. They deliberately match the IDs used by g733_headset.py.
+G733_VENDOR_ID = "0x046d"
+G733_PRODUCT_ID = "0x0b1f"
 # g733_headset.py uses this exit status when its receiver is present but the
 # headset does not answer. That normally means it is off or out of range, not
 # that the monitor has failed.
@@ -128,6 +138,46 @@ def parse_arguments() -> int:
         )
         raise SystemExit(2)
     return interval
+
+
+def g733_playback_is_active(snapshot: object) -> bool:
+    """Return whether PipeWire has an active playback link into the G733.
+
+    ``pw-dump`` is PipeWire's JSON registry snapshot. Looking for active links
+    rather than merely a running G733 sink matters: a sink can remain running
+    after a client has stopped playing, and must not keep the headset awake.
+    """
+    if not isinstance(snapshot, list):
+        raise ValueError("PipeWire registry is not a list")
+    g733_sinks: set[int] = set()
+    for item in snapshot:
+        if not isinstance(item, dict) or item.get("type") != "PipeWire:Interface:Node":
+            continue
+        info = item.get("info")
+        if not isinstance(info, dict):
+            continue
+        props = info.get("props")
+        if not isinstance(props, dict):
+            continue
+        if (
+            props.get("media.class") == "Audio/Sink"
+            and props.get("device.vendor.id", "").lower() == G733_VENDOR_ID
+            and props.get("device.product.id", "").lower() == G733_PRODUCT_ID
+            and isinstance(item.get("id"), int)
+        ):
+            g733_sinks.add(item["id"])
+
+    for item in snapshot:
+        if not isinstance(item, dict) or item.get("type") != "PipeWire:Interface:Link":
+            continue
+        info = item.get("info")
+        if (
+            isinstance(info, dict)
+            and info.get("state") == "active"
+            and info.get("input-node-id") in g733_sinks
+        ):
+            return True
+    return False
 
 
 def estimate_percent(voltage_mv: float) -> int:
@@ -252,9 +302,16 @@ def icon_for(level: int | None, *, is_error: bool = False, is_charging: bool = F
 
 
 class G733Tray:
-    def __init__(self, interval_seconds: int, headset: tuple[str, ...] = DEFAULT_HEADSET) -> None:
+    def __init__(
+        self,
+        interval_seconds: int,
+        headset: tuple[str, ...] = DEFAULT_HEADSET,
+        *,
+        idle_aware: bool = True,
+    ) -> None:
         # The command line that runs the headset tool; its subcommand is added.
         self.headset = tuple(headset)
+        self.idle_aware = idle_aware
         self.interval_ms = interval_seconds * 1000
         # Recent discharging voltages, for the median shown as the level.
         self.voltages: deque[int] = deque(maxlen=SMOOTHING_READINGS)
@@ -285,6 +342,11 @@ class G733Tray:
         self.restoring_lights = False
         # When the headset is expected to answer battery requests again.
         self.lights_settle_until = 0.0
+        # Set only after PipeWire positively reports that nothing is playing
+        # into the G733. A missing/broken PipeWire command falls back to the
+        # old polling behaviour rather than making the battery monitor silent.
+        self.polling_paused = False
+        self.audio_check_pending = False
 
         self.tray = QSystemTrayIcon(icon_for(None), QApplication.instance())
         self.tray.setToolTip(self.status_text)
@@ -297,7 +359,7 @@ class G733Tray:
         self.lights_status_action.setEnabled(False)
         self.lights_status_action.setVisible(False)
         self.refresh_action = QAction("Refresh now", self.menu)
-        self.refresh_action.triggered.connect(self.refresh)
+        self.refresh_action.triggered.connect(lambda: self.refresh(manual=True))
         # One item for both states: ticked while the lights are on, and a click
         # asks for the other state. The tick follows the remembered state, which
         # is also what the next startup applies.
@@ -320,6 +382,16 @@ class G733Tray:
         self.process.finished.connect(self.process_finished)
         self.process.errorOccurred.connect(self.process_error)
 
+        # PipeWire is queried separately from the HID process. A failed query
+        # is harmless and falls back to normal polling; it must never block the
+        # Qt event loop or the tray menu.
+        self.audio_process = QProcess()
+        self.audio_process.finished.connect(self.audio_check_finished)
+        self.audio_process.errorOccurred.connect(self.audio_check_error)
+        self.audio_timeout = QTimer()
+        self.audio_timeout.setSingleShot(True)
+        self.audio_timeout.timeout.connect(self.audio_check_timed_out)
+
         # The lights command runs on its own process and timer, so pressing the
         # menu item neither cancels a battery reading nor delays the next one.
         self.lights_process = QProcess()
@@ -334,28 +406,88 @@ class G733Tray:
         self.timeout.timeout.connect(self.process_timed_out)
         self.poll_timer = QTimer()
         self.poll_timer.setSingleShot(True)
-        self.poll_timer.timeout.connect(self.refresh)
+        self.poll_timer.timeout.connect(lambda: self.refresh(manual=False))
 
     def start(self) -> None:
         self.tray.show()
         # Any remembered lights state follows the first reading that succeeds.
-        QTimer.singleShot(0, self.refresh)
+        QTimer.singleShot(0, lambda: self.refresh(manual=False))
 
     def schedule_next_poll(self) -> None:
+        if self.polling_paused:
+            # This only starts pw-dump, not a HID request, so it cannot wake
+            # the headset while it is waiting for its firmware timeout.
+            self.poll_timer.start(IDLE_ACTIVITY_CHECK_MS)
+            return
         # A recent lights write both holds the next reading back and brings it
         # forward, so a reading it spoiled is corrected in seconds, not minutes.
         settling_ms = int((self.lights_settle_until - time.monotonic()) * 1000)
         delay_ms = min(self.interval_ms, settling_ms) if settling_ms > 0 else self.interval_ms
         self.poll_timer.start(delay_ms)
 
-    def refresh(self) -> None:
+    def refresh(self, manual: bool = True) -> None:
+        """Refresh now, or first check audio activity for an automatic poll."""
         if self.in_flight:
             return
+        if manual or not self.idle_aware:
+            # A user who explicitly asks for a refresh accepts that it wakes
+            # the headset, even when automatic polling is paused.
+            self.polling_paused = False
+            self.start_battery_request()
+            return
+        if self.audio_check_pending:
+            return
+        self.audio_check_pending = True
+        self.audio_process.start(PIPEWIRE_DUMP_COMMAND)
+        self.audio_timeout.start(ACTIVITY_QUERY_TIMEOUT_MS)
+
+    def start_battery_request(self) -> None:
+        """Start the HID battery request after the polling policy permits it."""
         self.in_flight = True
         self.refresh_action.setEnabled(False)
         self.status_action.setText("G733: refreshing…")
         self.run_headset(self.process, "battery")
         self.timeout.start(REQUEST_TIMEOUT_MS)
+
+    def audio_check_finished(self, exit_code: int, _exit_status: QProcess.ExitStatus) -> None:
+        if not self.audio_check_pending or self.quitting:
+            return
+        self.audio_check_pending = False
+        self.audio_timeout.stop()
+        output = bytes(self.audio_process.readAllStandardOutput()).decode(errors="replace")
+        if exit_code != 0:
+            self.audio_activity_unavailable()
+            return
+        try:
+            active = g733_playback_is_active(json.loads(output))
+        except (ValueError, json.JSONDecodeError):
+            self.audio_activity_unavailable()
+            return
+        self.polling_paused = not active
+        if active:
+            self.start_battery_request()
+        else:
+            self.apply_status()
+            self.schedule_next_poll()
+
+    def audio_check_error(self, _error: QProcess.ProcessError) -> None:
+        if not self.audio_check_pending or self.quitting:
+            return
+        self.audio_check_pending = False
+        self.audio_timeout.stop()
+        self.audio_activity_unavailable()
+
+    def audio_check_timed_out(self) -> None:
+        if not self.audio_check_pending:
+            return
+        self.audio_check_pending = False
+        self.audio_process.kill()
+        self.audio_activity_unavailable()
+
+    def audio_activity_unavailable(self) -> None:
+        """Keep the established polling behaviour without a usable PipeWire API."""
+        self.polling_paused = False
+        self.start_battery_request()
 
     def run_headset(self, process: QProcess, *arguments: str) -> None:
         """Start one headset tool command on one of the two processes."""
@@ -674,6 +806,8 @@ class G733Tray:
         self.lights_status_action.setText(self.lights_fault or "")
         self.lights_status_action.setVisible(self.lights_fault is not None)
         lines = [self.status_text]
+        if self.polling_paused:
+            lines.append("Battery polling paused while no audio is playing through the G733")
         if self.lights_fault is not None:
             lines.append(self.lights_fault)
         self.tray.setToolTip("\n".join(lines))
@@ -683,15 +817,16 @@ class G733Tray:
             QSystemTrayIcon.ActivationReason.Trigger,
             QSystemTrayIcon.ActivationReason.DoubleClick,
         }:
-            self.refresh()
+            self.refresh(manual=True)
 
     def quit(self) -> None:
         """Stop timers and any in-progress request before exiting cleanly."""
         self.quitting = True
         self.poll_timer.stop()
         self.timeout.stop()
+        self.audio_timeout.stop()
         self.lights_timeout.stop()
-        for process in (self.process, self.lights_process):
+        for process in (self.process, self.audio_process, self.lights_process):
             if process.state() != QProcess.ProcessState.NotRunning:
                 process.kill()
                 # Reaped before the object goes with the event loop; Qt aborts

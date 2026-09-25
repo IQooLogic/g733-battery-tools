@@ -24,6 +24,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from typing import ClassVar
 from unittest import mock
 
 # Must be set before the first QApplication; the suite needs no display.
@@ -75,7 +76,7 @@ def read_text(path: Path) -> str:
 
 def read_once(headset: str) -> str:
     """Run one refresh to completion and return the text the monitor settled on."""
-    monitor = tray.G733Tray(3600, headset=(headset,))
+    monitor = tray.G733Tray(3600, headset=(headset,), idle_aware=False)
     monitor.refresh()
     deadline = time.monotonic() + REQUEST_TIMEOUT_SECONDS
     while monitor.in_flight and time.monotonic() < deadline:
@@ -220,9 +221,93 @@ class EstimateTests(unittest.TestCase):
         self.assertEqual(tray.estimate_percent(3000), 0)
 
 
+class IdleAwarePollingTests(StubCommandMixin, unittest.TestCase):
+    """Automatic HID requests stop while PipeWire has no G733 playback."""
+
+    SINK: ClassVar[dict[str, object]] = {
+        "id": 55,
+        "type": "PipeWire:Interface:Node",
+        "info": {
+            "props": {
+                "media.class": "Audio/Sink",
+                "device.vendor.id": "0x046d",
+                "device.product.id": "0x0b1f",
+            }
+        },
+    }
+
+    def setUp(self) -> None:
+        super().setUp()
+        config = tempfile.TemporaryDirectory()
+        self.addCleanup(config.cleanup)
+        patched = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": config.name})
+        patched.start()
+        self.addCleanup(patched.stop)
+
+    def pw_dump(self, snapshot: list[dict]) -> str:
+        path = Path(self._tmp.name) / "pw-dump"
+        path.write_text(f"#!/usr/bin/env python3\nprint({json.dumps(snapshot)!r})\n")
+        path.chmod(path.stat().st_mode | stat.S_IEXEC)
+        return str(path)
+
+    def monitor(self, snapshot: list[dict]) -> tray.G733Tray:
+        command = self.pw_dump(snapshot)
+        patched = mock.patch.object(tray, "PIPEWIRE_DUMP_COMMAND", command)
+        patched.start()
+        self.addCleanup(patched.stop)
+        monitor = tray.G733Tray(3600, headset=(self.tool(),))
+        self.addCleanup(monitor.poll_timer.stop)
+        self.addCleanup(monitor.audio_timeout.stop)
+        self.addCleanup(monitor.lights_timeout.stop)
+        return monitor
+
+    def wait_for(self, done, message: str) -> None:
+        deadline = time.monotonic() + REQUEST_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            APP.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 20)
+            if done():
+                return
+        raise AssertionError(message)
+
+    def test_pipewire_snapshot_requires_an_active_link_to_the_g733_sink(self) -> None:
+        active_link = {
+            "type": "PipeWire:Interface:Link",
+            "info": {"state": "active", "input-node-id": 55},
+        }
+        self.assertTrue(tray.g733_playback_is_active([self.SINK, active_link]))
+        inactive_link = {
+            "type": "PipeWire:Interface:Link",
+            "info": {"state": "init", "input-node-id": 55},
+        }
+        self.assertFalse(tray.g733_playback_is_active([self.SINK, inactive_link]))
+
+    def test_no_active_audio_pauses_automatic_hid_polling(self) -> None:
+        monitor = self.monitor([self.SINK])
+        monitor.start()
+        self.wait_for(lambda: monitor.polling_paused, "PipeWire activity check did not finish")
+        self.assertEqual(self.ran(), [])
+        self.assertIn("polling paused", monitor.tray.toolTip())
+        self.assertGreater(monitor.poll_timer.remainingTime(), 0)
+        self.assertLessEqual(monitor.poll_timer.remainingTime(), tray.IDLE_ACTIVITY_CHECK_MS * 1.5)
+
+    def test_active_audio_starts_an_automatic_battery_request(self) -> None:
+        link = {"type": "PipeWire:Interface:Link", "info": {"state": "active", "input-node-id": 55}}
+        monitor = self.monitor([self.SINK, link])
+        monitor.start()
+        self.wait_for(lambda: "battery" in self.ran(), "battery request was not started")
+        self.assertFalse(monitor.polling_paused)
+
+    def test_manual_refresh_bypasses_the_paused_policy(self) -> None:
+        monitor = self.monitor([self.SINK])
+        monitor.start()
+        self.wait_for(lambda: monitor.polling_paused, "PipeWire activity check did not finish")
+        monitor.refresh()
+        self.wait_for(lambda: "battery" in self.ran(), "manual refresh did not start")
+
+
 class SmoothingTests(StubCommandMixin, unittest.TestCase):
     def monitor(self) -> tray.G733Tray:
-        monitor = tray.G733Tray(3600, headset=(self.tool(),))
+        monitor = tray.G733Tray(3600, headset=(self.tool(),), idle_aware=False)
         self.addCleanup(monitor.poll_timer.stop)
         return monitor
 
@@ -267,7 +352,7 @@ class LightsTests(StubCommandMixin, unittest.TestCase):
     """The lights action drives a real command, like the battery cases do."""
 
     def monitor(self, tool: str) -> tray.G733Tray:
-        monitor = tray.G733Tray(3600, headset=(tool,))
+        monitor = tray.G733Tray(3600, headset=(tool,), idle_aware=False)
         self.addCleanup(monitor.poll_timer.stop)
         self.addCleanup(monitor.lights_timeout.stop)
         return monitor
@@ -380,7 +465,7 @@ class LightsMemoryTests(StubCommandMixin, unittest.TestCase):
         self.state_file = tray.state_file()
 
     def monitor(self, tool: str) -> tray.G733Tray:
-        monitor = tray.G733Tray(3600, headset=(tool,))
+        monitor = tray.G733Tray(3600, headset=(tool,), idle_aware=False)
         self.addCleanup(monitor.poll_timer.stop)
         self.addCleanup(monitor.lights_timeout.stop)
         return monitor
@@ -575,7 +660,7 @@ class LightsMemoryTests(StubCommandMixin, unittest.TestCase):
 
 class NotificationTests(StubCommandMixin, unittest.TestCase):
     def monitor(self) -> tray.G733Tray:
-        monitor = tray.G733Tray(3600, headset=(self.tool(),))
+        monitor = tray.G733Tray(3600, headset=(self.tool(),), idle_aware=False)
         self.addCleanup(monitor.poll_timer.stop)
         return monitor
 
@@ -634,7 +719,7 @@ class ErrorLoggingTests(StubCommandMixin, unittest.TestCase):
     """Errors must reach stderr; an autostarted monitor has no other channel."""
 
     def monitor(self) -> tray.G733Tray:
-        monitor = tray.G733Tray(3600, headset=(self.tool(),))
+        monitor = tray.G733Tray(3600, headset=(self.tool(),), idle_aware=False)
         self.addCleanup(monitor.poll_timer.stop)
         return monitor
 
@@ -724,7 +809,7 @@ class FaultReportingTests(StubCommandMixin, unittest.TestCase):
     """A fault has to stay explained until it is actually over."""
 
     def monitor(self) -> tray.G733Tray:
-        monitor = tray.G733Tray(3600, headset=(self.tool(),))
+        monitor = tray.G733Tray(3600, headset=(self.tool(),), idle_aware=False)
         self.addCleanup(monitor.poll_timer.stop)
         self.addCleanup(monitor.lights_timeout.stop)
         return monitor
@@ -774,7 +859,7 @@ class ShutdownTests(StubCommandMixin, unittest.TestCase):
         slow = Path(self._tmp.name) / "slow"
         slow.write_text("#!/usr/bin/env bash\nsleep 30\n")
         slow.chmod(slow.stat().st_mode | stat.S_IEXEC)
-        monitor = tray.G733Tray(3600, headset=(str(slow),))
+        monitor = tray.G733Tray(3600, headset=(str(slow),), idle_aware=False)
         self.addCleanup(monitor.poll_timer.stop)
         monitor.refresh()
         monitor.set_lights(True)

@@ -70,6 +70,22 @@ POLL_SECONDS=120 ./start.sh
 variable of earlier versions are gone; `--command` is now rejected as an
 unknown argument.
 
+## Idle-aware polling
+
+Automatic battery reads run only while PipeWire reports an active playback
+link into the G733. When nothing is playing, the monitor stops sending HID++
+requests, allowing the headset's own inactivity timer to power it off. Its
+tooltip says that polling is paused. It checks PipeWire again every five
+seconds, but that check does not open or contact the headset HID interface.
+An active stream resumes normal polling; **Refresh now** and a click on the
+icon deliberately bypass the pause for one reading.
+
+This requires PipeWire's `pw-dump` command, which is normally installed with
+PipeWire. On a non-PipeWire desktop or if that command fails, the monitor
+falls back to its normal interval polling so battery monitoring continues.
+An active audio stream means an application is connected to the G733; it does
+not prove that the stream contains non-silent sound.
+
 ## Tests
 
 From this directory:
