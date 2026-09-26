@@ -35,10 +35,11 @@ From this directory:
 
 The monitor stays running when the G733 USB receiver is not connected. It
 shows a grey `?` with “receiver is disconnected” and checks sysfs every five
-seconds; this does not open the HID interface or contact a headset. Plugging
-in the receiver starts a battery reading immediately, without requiring a
-restart or active audio. The receiver can be present while the wireless
-headset is off or out of range; that is also normal.
+seconds; this does not open the HID interface or contact a headset. After the
+receiver returns, the monitor waits for PipeWire to see audio before it sends
+another automatic HID++ request; **Refresh now** can request one immediately.
+The receiver can be present while the wireless headset is off or out of range;
+that is also normal.
 
 The tray icon starts as `?`, then immediately takes its first reading and
 updates. The number inside it is the estimated battery percentage; while the
@@ -90,10 +91,11 @@ An active stream resumes normal polling; **Refresh now** and a click on the
 icon deliberately bypass the pause for one reading.
 
 A receiver that is disconnected is checked through sysfs every five seconds,
-which is also non-HID. A receiver that is present but whose headset is off or
-out of range gets one direct HID retry no more often than every 30 seconds (or
-the selected polling interval when longer). This discovers a headset switched
-on while idle, without turning the five-second PipeWire loop into HID polling.
+which is also non-HID. If the receiver is present but its headset is off or out
+of range, recovery also stays out of HID++: it waits for PipeWire to see an
+audio link, then reads the battery. This prevents background HID++ traffic
+from racing the headset's wireless/audio startup. **Refresh now** remains
+available when you explicitly want to wake it.
 
 This requires PipeWire's `pw-dump` command, which is normally installed with
 PipeWire. On a non-PipeWire desktop or if that command fails, the monitor
@@ -195,8 +197,8 @@ somewhat high.
 - A grey `?` means either no reading has completed yet, the receiver is
   disconnected, or the receiver cannot reach the headset. The tooltip
   distinguishes a disconnected receiver from a headset that is off or out of
-  range. The former is checked again through sysfs; the latter gets a sparse
-  direct retry so switching the headset on refreshes the icon without audio.
+  range. The former is checked again through sysfs; the latter waits for a
+  PipeWire audio link before another automatic HID++ request.
 - A grey `!` means the receiver or headset tool failed. Hover the icon for what
   happened. The `!` is replaced by the battery reading as soon as one succeeds
   again.
@@ -242,8 +244,9 @@ somewhat high.
   and it is tried again after the next successful reading.
 - Each battery reading and lights request has a 15-second timeout. A
   disconnected receiver is checked again every five seconds without HID
-  access; an offline headset gets the sparse retry described above. Other
-  failed battery readings are retried at the next interval. A failed lights
+  access; an offline headset is retried only after PipeWire sees audio (or
+  after an explicit refresh). Other failed battery readings are retried at the
+  next interval. A failed lights
   request is not retried, so click **Lights** again. A failed startup status
   check is retried after the next successful battery reading.
 

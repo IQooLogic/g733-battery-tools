@@ -910,7 +910,7 @@ class ShutdownTests(StubCommandMixin, unittest.TestCase):
 
 
 class ConnectionRecoveryTests(StubCommandMixin, unittest.TestCase):
-    """Receiver and headset availability recover without an audio stream or click."""
+    """Receiver recovery avoids unsolicited HID traffic while audio starts."""
 
     def monitor(self, tool: str) -> tray.G733Tray:
         monitor = tray.G733Tray(3600, headset=(tool,))
@@ -932,7 +932,7 @@ class ConnectionRecoveryTests(StubCommandMixin, unittest.TestCase):
         self.assertGreater(monitor.poll_timer.remainingTime(), 0)
         self.assertLessEqual(monitor.poll_timer.remainingTime(), tray.RECEIVER_CHECK_MS * 1.5)
 
-    def test_reinserted_receiver_starts_a_reading_without_audio(self) -> None:
+    def test_reinserted_receiver_waits_for_audio_before_reading(self) -> None:
         monitor = self.monitor(self.tool())
         monitor.show_receiver_unavailable()
         with (
@@ -940,20 +940,24 @@ class ConnectionRecoveryTests(StubCommandMixin, unittest.TestCase):
             mock.patch.object(monitor, "start_battery_request") as requested,
         ):
             monitor.poll_timed_out()
-        requested.assert_called_once_with()
+        requested.assert_not_called()
         self.assertFalse(monitor.receiver_unavailable)
+        self.assertTrue(monitor.headset_unavailable)
+        self.assertTrue(monitor.polling_paused)
         self.assertIn("receiver connected", monitor.status_text)
 
-    def test_offline_headset_gets_a_sparse_direct_retry(self) -> None:
+    def test_offline_headset_waits_for_audio_before_retrying_hid(self) -> None:
         monitor = self.monitor(self.tool())
         monitor.show_headset_unavailable()
         with (
             mock.patch.object(tray, "find_device", return_value=Path("/dev/hidraw7")),
+            mock.patch.object(monitor, "refresh") as refreshed,
             mock.patch.object(monitor, "start_battery_request") as requested,
         ):
             monitor.poll_timed_out()
-        requested.assert_called_once_with()
-        self.assertFalse(monitor.polling_paused)
+        refreshed.assert_called_once_with(manual=False)
+        requested.assert_not_called()
+        self.assertTrue(monitor.polling_paused)
 
     def test_a_successful_reading_leaves_connection_recovery_mode(self) -> None:
         monitor = self.monitor(self.tool())

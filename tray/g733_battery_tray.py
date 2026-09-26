@@ -41,10 +41,6 @@ MINIMUM_INTERVAL_SECONDS = 5
 # Checking sysfs does not open the HID interface, so it is safe to do while a
 # receiver is absent or the headset is waiting for its own idle power-off.
 RECEIVER_CHECK_MS = 5_000
-# A switched-off headset has no USB event of its own.  Probe it only
-# occasionally so turning it on refreshes the tray without audio, while idle
-# polling still cannot keep an otherwise unused headset awake.
-HEADSET_RETRY_MIN_MS = 30_000
 REQUEST_TIMEOUT_MS = 15_000
 # Measured on the G733 when HeadsetControl switched the lights: for about two
 # seconds afterwards it got no usable battery reading. A reading taken inside
@@ -448,7 +444,12 @@ class G733Tray:
             self.poll_timer.start(RECEIVER_CHECK_MS)
             return
         if self.headset_unavailable:
-            self.poll_timer.start(max(self.interval_ms, HEADSET_RETRY_MIN_MS))
+            # A missing headset must not be probed in the background.  HID++
+            # traffic while its wireless/audio link is coming up can make the
+            # receiver miss the initial audio connection.  Poll PipeWire only;
+            # a real playback link (or Refresh now) authorises the next HID
+            # request.
+            self.poll_timer.start(IDLE_ACTIVITY_CHECK_MS)
             return
         if self.polling_paused:
             # This only starts pw-dump, not a HID request, so it cannot wake
@@ -477,20 +478,21 @@ class G733Tray:
             return
 
         if self.receiver_unavailable:
-            # The USB device has returned.  Do not wait for audio: this first
-            # request both updates the icon and discovers whether the headset
-            # itself is powered on.
+            # The USB device has returned, but its wireless/audio path may
+            # still be initialising.  Keep recovery non-invasive until
+            # PipeWire confirms playback or the user explicitly refreshes.
             self.receiver_unavailable = False
-            self.headset_unavailable = False
-            self.polling_paused = False
-            self.status_text = "G733 receiver connected; refreshing…"
+            self.headset_unavailable = True
+            self.polling_paused = True
+            self.status_text = "G733 receiver connected; waiting for audio…"
             self.apply_status()
-            self.start_battery_request()
+            self.schedule_next_poll()
         elif self.headset_unavailable:
-            # The previous probe proved the receiver exists.  A sparse HID
-            # probe is the only way to notice a headset powered on without an
-            # audio stream; it is deliberately not the five-second idle loop.
-            self.start_battery_request()
+            # Do not send another unsolicited HID++ request merely because the
+            # headset was previously unavailable.  In particular, this must
+            # not race the headset's wireless/audio startup.  refresh(False)
+            # queries PipeWire first and contacts HID only once audio is live.
+            self.refresh(manual=False)
         else:
             self.refresh(manual=False)
 
@@ -888,7 +890,9 @@ class G733Tray:
         self.last_error = None
         self.receiver_unavailable = False
         self.headset_unavailable = True
-        self.polling_paused = False
+        # The recovery loop is deliberately PipeWire-only until playback
+        # proves the headset has completed its audio connection.
+        self.polling_paused = True
         self.tray.setIcon(icon_for(None))
         self.status_text = "G733 headset is off or out of range; waiting to reconnect"
         self.apply_status()
