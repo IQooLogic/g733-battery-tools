@@ -180,11 +180,15 @@ class BatteryStateTests(StubCommandMixin, unittest.TestCase):
         text = self.read_payload(
             "", exit_code=tray.HEADSET_UNAVAILABLE_EXIT, error="no answer from the headset"
         )
-        self.assertEqual(text, "G733 headset is off or out of range")
+        self.assertEqual(text, "G733 headset is off or out of range; waiting to reconnect")
 
-    def test_a_failure_without_a_message_reports_its_status(self) -> None:
-        text = self.read_payload("", exit_code=4)
-        self.assertEqual(text, "G733 battery unavailable: headset tool exited with 4")
+    def test_a_missing_receiver_is_not_shown_as_a_hid_error(self) -> None:
+        text = self.read_payload("", exit_code=tray.RECEIVER_UNAVAILABLE_EXIT)
+        self.assertEqual(text, "G733 receiver is disconnected; waiting to reconnect")
+
+    def test_an_unknown_failure_without_a_message_reports_its_status(self) -> None:
+        text = self.read_payload("", exit_code=5)
+        self.assertEqual(text, "G733 battery unavailable: headset tool exited with 5")
 
     def test_unparseable_output_is_reported(self) -> None:
         cases = {
@@ -328,6 +332,17 @@ class IdleAwarePollingTests(StubCommandMixin, unittest.TestCase):
         self.wait_for(lambda: monitor.polling_paused, "PipeWire activity check did not finish")
         monitor.refresh()
         self.wait_for(lambda: self.ran().count("battery") == 2, "manual refresh did not start")
+
+    def test_manual_refresh_invalidates_a_pending_audio_check(self) -> None:
+        monitor = self.monitor([self.SINK])
+        monitor.audio_check_pending = True
+        with mock.patch.object(monitor, "start_battery_request") as requested:
+            monitor.refresh()
+            # A queued completion after the click belongs to the cancelled
+            # query and must not start a second HID process.
+            monitor.audio_check_finished(0, tray.QProcess.ExitStatus.NormalExit)
+        requested.assert_called_once_with()
+        self.assertFalse(monitor.audio_check_pending)
 
 
 class SmoothingTests(StubCommandMixin, unittest.TestCase):
@@ -894,51 +909,58 @@ class ShutdownTests(StubCommandMixin, unittest.TestCase):
         logged.assert_not_called()
 
 
-class ReceiverWaitTests(unittest.TestCase):
-    def test_returns_immediately_when_the_receiver_is_present(self) -> None:
-        sleeps: list[float] = []
-        self.assertTrue(
-            tray.wait_for_receiver(
-                finder=lambda: Path("/dev/hidraw7"),
-                sleep=sleeps.append,
-            )
-        )
-        self.assertEqual(sleeps, [])
+class ConnectionRecoveryTests(StubCommandMixin, unittest.TestCase):
+    """Receiver and headset availability recover without an audio stream or click."""
 
-    def test_waits_for_a_receiver_that_appears(self) -> None:
-        attempts = iter((tray.ReceiverNotFound("not found"), Path("/dev/hidraw7")))
-        sleeps: list[float] = []
+    def monitor(self, tool: str) -> tray.G733Tray:
+        monitor = tray.G733Tray(3600, headset=(tool,))
+        self.addCleanup(monitor.poll_timer.stop)
+        self.addCleanup(monitor.audio_timeout.stop)
+        self.addCleanup(monitor.lights_timeout.stop)
+        return monitor
 
-        def finder() -> Path:
-            result = next(attempts)
-            if isinstance(result, Exception):
-                raise result
-            return result
+    def test_absent_receiver_is_checked_again_without_hid_access(self) -> None:
+        monitor = self.monitor(self.tool())
+        monitor.show_receiver_unavailable()
+        with (
+            mock.patch.object(tray, "find_device", side_effect=tray.ReceiverNotFound("absent")),
+            mock.patch.object(monitor, "start_battery_request") as requested,
+        ):
+            monitor.poll_timed_out()
+        requested.assert_not_called()
+        self.assertTrue(monitor.receiver_unavailable)
+        self.assertGreater(monitor.poll_timer.remainingTime(), 0)
+        self.assertLessEqual(monitor.poll_timer.remainingTime(), tray.RECEIVER_CHECK_MS * 1.5)
 
-        self.assertTrue(
-            tray.wait_for_receiver(
-                finder=finder,
-                sleep=sleeps.append,
-                monotonic=lambda: 10,
-            )
-        )
-        self.assertEqual(sleeps, [tray.RECEIVER_POLL_SECONDS])
+    def test_reinserted_receiver_starts_a_reading_without_audio(self) -> None:
+        monitor = self.monitor(self.tool())
+        monitor.show_receiver_unavailable()
+        with (
+            mock.patch.object(tray, "find_device", return_value=Path("/dev/hidraw7")),
+            mock.patch.object(monitor, "start_battery_request") as requested,
+        ):
+            monitor.poll_timed_out()
+        requested.assert_called_once_with()
+        self.assertFalse(monitor.receiver_unavailable)
+        self.assertIn("receiver connected", monitor.status_text)
 
-    def test_returns_false_once_the_receiver_wait_expires(self) -> None:
-        clock = iter((0, 30))
-        self.assertFalse(
-            tray.wait_for_receiver(
-                finder=lambda: (_ for _ in ()).throw(tray.ReceiverNotFound("not found")),
-                sleep=lambda _seconds: self.fail("must not sleep after the deadline"),
-                monotonic=lambda: next(clock),
-            )
-        )
+    def test_offline_headset_gets_a_sparse_direct_retry(self) -> None:
+        monitor = self.monitor(self.tool())
+        monitor.show_headset_unavailable()
+        with (
+            mock.patch.object(tray, "find_device", return_value=Path("/dev/hidraw7")),
+            mock.patch.object(monitor, "start_battery_request") as requested,
+        ):
+            monitor.poll_timed_out()
+        requested.assert_called_once_with()
+        self.assertFalse(monitor.polling_paused)
 
-    def test_propagates_an_unexpected_inspection_error(self) -> None:
-        with self.assertRaisesRegex(tray.HeadsetError, "cannot inspect"):
-            tray.wait_for_receiver(
-                finder=lambda: (_ for _ in ()).throw(tray.HeadsetError("cannot inspect"))
-            )
+    def test_a_successful_reading_leaves_connection_recovery_mode(self) -> None:
+        monitor = self.monitor(self.tool())
+        monitor.show_receiver_unavailable()
+        monitor.show_reading("discharging", 3989)
+        self.assertFalse(monitor.receiver_unavailable)
+        self.assertFalse(monitor.headset_unavailable)
 
 
 class ArgumentTests(unittest.TestCase):

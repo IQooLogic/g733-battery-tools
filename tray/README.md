@@ -33,11 +33,12 @@ From this directory:
 ./start.sh
 ```
 
-At startup, the monitor waits up to 30 seconds for the G733 USB receiver's
-HID++ interface. It exits quietly if the receiver does not appear, rather than
-leaving an idle tray process running. The receiver can be present while the
-wireless headset is off or out of range; that is normal and the monitor keeps
-running in that case.
+The monitor stays running when the G733 USB receiver is not connected. It
+shows a grey `?` with “receiver is disconnected” and checks sysfs every five
+seconds; this does not open the HID interface or contact a headset. Plugging
+in the receiver starts a battery reading immediately, without requiring a
+restart or active audio. The receiver can be present while the wireless
+headset is off or out of range; that is also normal.
 
 The tray icon starts as `?`, then immediately takes its first reading and
 updates. The number inside it is the estimated battery percentage; while the
@@ -87,6 +88,12 @@ tooltip says that polling is paused. It checks PipeWire again every five
 seconds, but that check does not open or contact the headset HID interface.
 An active stream resumes normal polling; **Refresh now** and a click on the
 icon deliberately bypass the pause for one reading.
+
+A receiver that is disconnected is checked through sysfs every five seconds,
+which is also non-HID. A receiver that is present but whose headset is off or
+out of range gets one direct HID retry no more often than every 30 seconds (or
+the selected polling interval when longer). This discovers a headset switched
+on while idle, without turning the five-second PipeWire loop into HID polling.
 
 This requires PipeWire's `pw-dump` command, which is normally installed with
 PipeWire. On a non-PipeWire desktop or if that command fails, the monitor
@@ -185,9 +192,11 @@ somewhat high.
 - A "fully charged" notification is sent once when the headset reports that
   charging has finished. It is sent again only after the headset has been off
   the cable, so a headset left charging overnight is announced once.
-- A grey `?` means either no reading has completed yet or the receiver cannot
-  reach the headset. The latter is the expected state while it is off or out of
-  range; the tooltip says so and it is retried at the next interval.
+- A grey `?` means either no reading has completed yet, the receiver is
+  disconnected, or the receiver cannot reach the headset. The tooltip
+  distinguishes a disconnected receiver from a headset that is off or out of
+  range. The former is checked again through sysfs; the latter gets a sparse
+  direct retry so switching the headset on refreshes the icon without audio.
 - A grey `!` means the receiver or headset tool failed. Hover the icon for what
   happened. The `!` is replaced by the battery reading as soon as one succeeds
   again.
@@ -231,9 +240,11 @@ somewhat high.
   put on the icon: the icon reports the battery, and that reading is still
   valid. A failed restore is not notified: you pressed nothing to cause it,
   and it is tried again after the next successful reading.
-- Each battery reading and lights request has a 15-second timeout. A failed
-  battery reading is retried at the next interval; a failed lights request is
-  not retried, so click **Lights** again. A failed startup status check is
-  retried after the next successful battery reading.
+- Each battery reading and lights request has a 15-second timeout. A
+  disconnected receiver is checked again every five seconds without HID
+  access; an offline headset gets the sparse retry described above. Other
+  failed battery readings are retried at the next interval. A failed lights
+  request is not retried, so click **Lights** again. A failed startup status
+  check is retried after the next successful battery reading.
 
 [solaar]: https://github.com/pwr-Solaar/Solaar

@@ -11,8 +11,10 @@ Each command prints one JSON object on success and exits with status 0:
     {"voltage_mv": 3812, "flags": 1, "state": "discharging"}
     {"lights": "off"}
 
-On failure it prints the reason to standard error and exits with status 1.
-Only the standard library is used, so it starts quickly on every poll.
+On failure it prints the reason to standard error. It exits with status 3
+when the receiver cannot reach the headset, 4 when the receiver is absent, and
+1 for other failures. Only the standard library is used, so it starts quickly
+on every poll.
 
 The G733 has no battery-percentage feature. Its only battery source is
 ADC_MEASUREMENT (HID++ 2.0 feature 0x1F20), which reports the cell voltage and
@@ -23,6 +25,7 @@ lights are the two zones of COLOR_LED_EFFECTS (0x8070).
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import select
@@ -50,8 +53,10 @@ REPLY_TIMEOUT_SECONDS = 2.0
 # when the monitor is autostarted before the receiver has settled.
 BUSY_RETRY_DELAY_SECONDS = 0.1
 # A receiver can remain connected while its headset is switched off or out of
-# range. Keep that expected condition distinct from a receiver/tool failure.
+# range. Keep that expected condition distinct from a missing receiver and a
+# real tool/protocol failure, so the tray can recover from either connection.
 HEADSET_UNAVAILABLE_EXIT = 3
+RECEIVER_UNAVAILABLE_EXIT = 4
 
 ROOT_FEATURE_INDEX = 0x00
 ADC_MEASUREMENT_FEATURE = 0x1F20
@@ -131,13 +136,28 @@ def matches_g733(uevent: str) -> bool:
 
 
 def find_device(sysfs: Path = SYSFS_HIDRAW) -> Path:
-    """Return the /dev node of the G733 interface that speaks HID++."""
+    """Return the /dev node of the G733 interface that speaks HID++.
+
+    A hidraw directory can change while it is being scanned, especially during
+    USB removal.  A vanished unrelated entry must not hide a G733 that is
+    still present on a later entry.
+    """
     for node in sorted(sysfs.glob("hidraw*")):
         try:
             uevent = (node / "device" / "uevent").read_text()
-            if not matches_g733(uevent):
-                continue
+        except FileNotFoundError:
+            continue
+        except OSError:
+            # The node may belong to another USB device and disappear midway
+            # through its uevent read.  Keep scanning rather than failing the
+            # G733 lookup because of that unrelated hotplug race.
+            continue
+        if not matches_g733(uevent):
+            continue
+        try:
             descriptor = (node / "device" / "report_descriptor").read_bytes()
+        except FileNotFoundError:
+            continue
         except OSError as exc:
             raise HeadsetError(f"could not inspect {node}: {exc}") from exc
         if LONG_REPORT_DESCRIPTOR_ITEM in descriptor:
@@ -145,6 +165,20 @@ def find_device(sysfs: Path = SYSFS_HIDRAW) -> Path:
     raise ReceiverNotFound(
         f"G733 receiver {VENDOR_ID:04x}:{PRODUCT_ID:04x} not found; is it plugged in?"
     )
+
+
+def disconnected_os_error(exc: OSError) -> bool:
+    """Return whether an I/O failure says the USB hidraw node vanished."""
+    return exc.errno in {errno.ENODEV, errno.ENOENT, errno.ENXIO}
+
+
+def require_reply(reply: bytes, size: int, operation: str) -> bytes:
+    """Reject a matched but truncated HID++ reply before indexing it."""
+    if len(reply) < size:
+        raise HeadsetError(
+            f"headset sent a short {operation} reply ({len(reply)} bytes, expected at least {size})"
+        )
+    return reply
 
 
 def request(
@@ -192,7 +226,10 @@ def feature_index(fd: int, feature: int, name: str) -> int:
     """Return where the headset keeps one feature."""
     # Looked up rather than hard-coded, so a firmware that moves the feature
     # still works. ROOT function 0 is getFeature(feature id).
-    index = request(fd, ROOT_FEATURE_INDEX, 0, feature.to_bytes(2, "big"))[0]
+    reply = require_reply(
+        request(fd, ROOT_FEATURE_INDEX, 0, feature.to_bytes(2, "big")), 1, "getFeature"
+    )
+    index = reply[0]
     if index == 0:
         raise HeadsetError(f"headset has no {name} feature (0x{feature:04X})")
     return index
@@ -211,7 +248,7 @@ def decode(voltage_mv: int, flags: int) -> dict[str, object]:
 def read_battery(fd: int) -> dict[str, object]:
     """Take one reading from ADC_MEASUREMENT."""
     index = feature_index(fd, ADC_MEASUREMENT_FEATURE, "ADC measurement")
-    reply = request(fd, index, 0)
+    reply = require_reply(request(fd, index, 0), 3, "ADC measurement")
     return decode(int.from_bytes(reply[0:2], "big"), reply[2])
 
 
@@ -219,9 +256,16 @@ def effect_slot(fd: int, index: int, zone: int, effect_id: int) -> int:
     """Return the position of one effect in a zone's list of effects."""
     # setZoneEffect takes the position, not the id, and the order of the list
     # is the firmware's, so it is looked up in each zone.
-    count = request(fd, index, LED_GET_ZONE_INFO, bytes([zone, 0xFF, 0x00]))[3]
+    zone_info = require_reply(
+        request(fd, index, LED_GET_ZONE_INFO, bytes([zone, 0xFF, 0x00])), 4, "LED zone info"
+    )
+    count = zone_info[3]
     for slot in range(count):
-        info = request(fd, index, LED_GET_ZONE_EFFECT_INFO, bytes([zone, slot, 0x00]))
+        info = require_reply(
+            request(fd, index, LED_GET_ZONE_EFFECT_INFO, bytes([zone, slot, 0x00])),
+            4,
+            "LED zone effect info",
+        )
         if int.from_bytes(info[2:4], "big") == effect_id:
             return slot
     raise HeadsetError(f"LED zone {zone} has no effect 0x{effect_id:04x}")
@@ -230,7 +274,7 @@ def effect_slot(fd: int, index: int, zone: int, effect_id: int) -> int:
 def lights_info(fd: int) -> tuple[int, int, int]:
     """Return the LED feature index, zone count, and extended capabilities."""
     index = feature_index(fd, COLOR_LED_EFFECTS_FEATURE, "LED effects")
-    info = request(fd, index, LED_GET_INFO)
+    info = require_reply(request(fd, index, LED_GET_INFO), 5, "LED info")
     zones = info[0]
     if zones == 0:
         raise HeadsetError("headset reports no LED zones")
@@ -246,7 +290,9 @@ def read_lights(fd: int) -> dict[str, object]:
         raise HeadsetError("headset cannot report its current LED effect")
 
     for zone in range(zones):
-        setting = request(fd, index, LED_GET_ZONE_EFFECT, bytes([zone]))
+        setting = require_reply(
+            request(fd, index, LED_GET_ZONE_EFFECT, bytes([zone])), 2, "LED current effect"
+        )
         if setting[0] != zone:
             raise HeadsetError(f"LED effect reply named zone {setting[0]}, expected {zone}")
         # getZoneEffect returns the active effect id. Unlike setZoneEffect,
@@ -284,6 +330,10 @@ def main(argv: list[str] | None = None) -> int:
         except PermissionError as exc:
             raise HeadsetError(f"no permission to open {path}; {UDEV_HINT}") from exc
         except OSError as exc:
+            if disconnected_os_error(exc):
+                raise ReceiverNotFound(
+                    "G733 receiver disconnected while opening its HID interface"
+                ) from exc
             raise HeadsetError(f"could not open {path}: {exc}") from exc
         try:
             if arguments.command == "battery":
@@ -293,12 +343,20 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 result = set_lights(fd, arguments.state == "on")
         except OSError as exc:
+            if disconnected_os_error(exc):
+                raise ReceiverNotFound(
+                    "G733 receiver disconnected while reading its HID interface"
+                ) from exc
             raise HeadsetError(f"could not talk to {path}: {exc}") from exc
         finally:
             os.close(fd)
     except HeadsetError as exc:
         print(exc, file=sys.stderr)
-        return HEADSET_UNAVAILABLE_EXIT if isinstance(exc, HeadsetUnavailable) else 1
+        if isinstance(exc, HeadsetUnavailable):
+            return HEADSET_UNAVAILABLE_EXIT
+        if isinstance(exc, ReceiverNotFound):
+            return RECEIVER_UNAVAILABLE_EXIT
+        return 1
     print(json.dumps(result))
     return 0
 

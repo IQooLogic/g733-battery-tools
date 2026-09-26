@@ -11,7 +11,6 @@ import statistics
 import sys
 import time
 from collections import deque
-from collections.abc import Callable
 from itertools import pairwise
 from pathlib import Path
 
@@ -39,8 +38,13 @@ LIGHTS_LABEL = "Lights"
 LOW_BATTERY_PERCENT = 20
 LOW_BATTERY_RESET_PERCENT = 25
 MINIMUM_INTERVAL_SECONDS = 5
-RECEIVER_WAIT_SECONDS = 30
-RECEIVER_POLL_SECONDS = 1
+# Checking sysfs does not open the HID interface, so it is safe to do while a
+# receiver is absent or the headset is waiting for its own idle power-off.
+RECEIVER_CHECK_MS = 5_000
+# A switched-off headset has no USB event of its own.  Probe it only
+# occasionally so turning it on refreshes the tray without audio, while idle
+# polling still cannot keep an otherwise unused headset awake.
+HEADSET_RETRY_MIN_MS = 30_000
 REQUEST_TIMEOUT_MS = 15_000
 # Measured on the G733 when HeadsetControl switched the lights: for about two
 # seconds afterwards it got no usable battery reading. A reading taken inside
@@ -57,10 +61,10 @@ PIPEWIRE_DUMP_COMMAND = "pw-dump"
 G733_VENDOR_ID = "0x046d"
 G733_PRODUCT_ID = "0x0b1f"
 G733_ALSA_COMPONENT = f"usb{G733_VENDOR_ID[2:]}:{G733_PRODUCT_ID[2:]}"
-# g733_headset.py uses this exit status when its receiver is present but the
-# headset does not answer. That normally means it is off or out of range, not
-# that the monitor has failed.
+# g733_headset.py distinguishes the two expected unavailable states from a
+# real tool/protocol failure, so the tray can wait for the right thing.
 HEADSET_UNAVAILABLE_EXIT = 3
+RECEIVER_UNAVAILABLE_EXIT = 4
 
 # The battery states the headset tool reports. It exits with an error for
 # anything else.
@@ -144,31 +148,6 @@ def parse_arguments() -> int:
         )
         raise SystemExit(2)
     return interval
-
-
-def wait_for_receiver(
-    wait_seconds: float = RECEIVER_WAIT_SECONDS,
-    poll_seconds: float = RECEIVER_POLL_SECONDS,
-    finder: Callable[[], Path] = find_device,
-    sleep: Callable[[float], None] = time.sleep,
-    monotonic: Callable[[], float] = time.monotonic,
-) -> bool:
-    """Wait briefly for the receiver's HID++ interface without opening it.
-
-    USB devices can appear after the desktop autostarts. Once this bounded wait
-    expires, a later receiver connection should launch the monitor via a
-    device-triggered service rather than leave an idle tray process running.
-    """
-    deadline = monotonic() + wait_seconds
-    while True:
-        try:
-            finder()
-            return True
-        except ReceiverNotFound:
-            remaining = deadline - monotonic()
-            if remaining <= 0:
-                return False
-            sleep(min(poll_seconds, remaining))
 
 
 def g733_playback_is_active(snapshot: object) -> bool:
@@ -391,6 +370,10 @@ class G733Tray:
         # old polling behaviour rather than making the battery monitor silent.
         self.polling_paused = False
         self.audio_check_pending = False
+        # These expected connection states have their own retry policy.  They
+        # are separate from last_error: neither means the monitor is broken.
+        self.receiver_unavailable = False
+        self.headset_unavailable = False
 
         self.tray = QSystemTrayIcon(icon_for(None), QApplication.instance())
         self.tray.setToolTip(self.status_text)
@@ -450,7 +433,7 @@ class G733Tray:
         self.timeout.timeout.connect(self.process_timed_out)
         self.poll_timer = QTimer()
         self.poll_timer.setSingleShot(True)
-        self.poll_timer.timeout.connect(lambda: self.refresh(manual=False))
+        self.poll_timer.timeout.connect(self.poll_timed_out)
 
     def start(self) -> None:
         self.tray.show()
@@ -461,6 +444,12 @@ class G733Tray:
         QTimer.singleShot(0, lambda: self.refresh(manual=True))
 
     def schedule_next_poll(self) -> None:
+        if self.receiver_unavailable:
+            self.poll_timer.start(RECEIVER_CHECK_MS)
+            return
+        if self.headset_unavailable:
+            self.poll_timer.start(max(self.interval_ms, HEADSET_RETRY_MIN_MS))
+            return
         if self.polling_paused:
             # This only starts pw-dump, not a HID request, so it cannot wake
             # the headset while it is waiting for its firmware timeout.
@@ -472,6 +461,48 @@ class G733Tray:
         delay_ms = min(self.interval_ms, settling_ms) if settling_ms > 0 else self.interval_ms
         self.poll_timer.start(delay_ms)
 
+    def poll_timed_out(self) -> None:
+        """Advance the connection-aware polling state machine once."""
+        if self.in_flight or self.quitting:
+            return
+        try:
+            find_device()
+        except ReceiverNotFound:
+            self.show_receiver_unavailable()
+            self.schedule_next_poll()
+            return
+        except HeadsetError as exc:
+            self.show_error(f"Could not inspect the G733 receiver: {exc}")
+            self.schedule_next_poll()
+            return
+
+        if self.receiver_unavailable:
+            # The USB device has returned.  Do not wait for audio: this first
+            # request both updates the icon and discovers whether the headset
+            # itself is powered on.
+            self.receiver_unavailable = False
+            self.headset_unavailable = False
+            self.polling_paused = False
+            self.status_text = "G733 receiver connected; refreshing…"
+            self.apply_status()
+            self.start_battery_request()
+        elif self.headset_unavailable:
+            # The previous probe proved the receiver exists.  A sparse HID
+            # probe is the only way to notice a headset powered on without an
+            # audio stream; it is deliberately not the five-second idle loop.
+            self.start_battery_request()
+        else:
+            self.refresh(manual=False)
+
+    def cancel_audio_check(self) -> None:
+        """Invalidate an idle query before an explicit HID request supersedes it."""
+        if not self.audio_check_pending:
+            return
+        self.audio_check_pending = False
+        self.audio_timeout.stop()
+        if self.audio_process.state() != QProcess.ProcessState.NotRunning:
+            self.audio_process.kill()
+
     def refresh(self, manual: bool = True) -> None:
         """Refresh now, or first check audio activity for an automatic poll."""
         if self.in_flight:
@@ -479,6 +510,7 @@ class G733Tray:
         if manual or not self.idle_aware:
             # A user who explicitly asks for a refresh accepts that it wakes
             # the headset, even when automatic polling is paused.
+            self.cancel_audio_check()
             self.polling_paused = False
             self.start_battery_request()
             return
@@ -490,6 +522,8 @@ class G733Tray:
 
     def start_battery_request(self) -> None:
         """Start the HID battery request after the polling policy permits it."""
+        if self.in_flight or self.process.state() != QProcess.ProcessState.NotRunning:
+            return
         self.in_flight = True
         self.refresh_action.setEnabled(False)
         self.status_action.setText("G733: refreshing…")
@@ -511,7 +545,7 @@ class G733Tray:
             self.audio_activity_unavailable()
             return
         self.polling_paused = not active
-        if active:
+        if active and not self.in_flight:
             self.start_battery_request()
         else:
             self.apply_status()
@@ -533,6 +567,8 @@ class G733Tray:
 
     def audio_activity_unavailable(self) -> None:
         """Keep the established polling behaviour without a usable PipeWire API."""
+        if self.in_flight:
+            return
         self.polling_paused = False
         self.start_battery_request()
 
@@ -733,13 +769,18 @@ class G733Tray:
             return
         output = bytes(self.process.readAllStandardOutput()).decode(errors="replace")
         error_output = bytes(self.process.readAllStandardError()).decode(errors="replace").strip()
-        self.finish_request()
+        if exit_code == RECEIVER_UNAVAILABLE_EXIT:
+            self.show_receiver_unavailable()
+            self.finish_request()
+            return
         if exit_code == HEADSET_UNAVAILABLE_EXIT:
             self.show_headset_unavailable()
+            self.finish_request()
             return
         if exit_code != 0:
             details = error_output or f"headset tool exited with {exit_code}"
             self.show_error(f"G733 battery unavailable: {details}")
+            self.finish_request()
             return
         try:
             reading = json.loads(output)
@@ -751,8 +792,10 @@ class G733Tray:
                 raise ValueError(f"invalid voltage {voltage_mv!r}")
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             self.show_error(f"G733 battery unavailable: unreadable headset tool output: {exc}")
+            self.finish_request()
             return
         self.show_reading(state, voltage_mv)
+        self.finish_request()
         # The headset has just answered, so a remembered lights state that could
         # not be applied yet can be now. Otherwise read its setting so a headset
         # switched on after the monitor has the right menu tick.
@@ -765,18 +808,20 @@ class G733Tray:
         if self.quitting:
             return
         if error == QProcess.ProcessError.FailedToStart and self.in_flight:
-            self.finish_request()
             self.show_error(f"Could not start the headset tool: {self.process.errorString()}")
+            self.finish_request()
 
     def process_timed_out(self) -> None:
         if not self.in_flight:
             return
         self.process.kill()
-        self.finish_request()
         self.show_error("G733 battery request timed out")
+        self.finish_request()
 
     def show_reading(self, state: str, voltage_mv: int) -> None:
         """Display one battery reading, and raise any notification it calls for."""
+        self.receiver_unavailable = False
+        self.headset_unavailable = False
         if state == STATE_DISCHARGING:
             self.voltages.append(voltage_mv)
             smoothed_mv = round(statistics.median(self.voltages))
@@ -826,12 +871,26 @@ class G733Tray:
             # on it, which may top up and finish again, is announced once.
             self.full_battery_notified = False
 
+    def show_receiver_unavailable(self) -> None:
+        """Show a disconnected receiver as a recoverable, non-fault state."""
+        self.voltages.clear()
+        self.last_error = None
+        self.receiver_unavailable = True
+        self.headset_unavailable = False
+        self.polling_paused = False
+        self.tray.setIcon(icon_for(None))
+        self.status_text = "G733 receiver is disconnected; waiting to reconnect"
+        self.apply_status()
+
     def show_headset_unavailable(self) -> None:
         """Show an offline headset as an expected idle state, not a fault."""
         self.voltages.clear()
         self.last_error = None
+        self.receiver_unavailable = False
+        self.headset_unavailable = True
+        self.polling_paused = False
         self.tray.setIcon(icon_for(None))
-        self.status_text = "G733 headset is off or out of range"
+        self.status_text = "G733 headset is off or out of range; waiting to reconnect"
         self.apply_status()
 
     def show_error(self, message: str) -> None:
@@ -842,6 +901,7 @@ class G733Tray:
             self.last_error = message
         # The headset may have been off for hours; its old voltages no longer
         # describe the battery.
+        self.headset_unavailable = False
         self.voltages.clear()
         self.tray.setIcon(icon_for(None, is_error=True))
         self.status_text = message
@@ -892,15 +952,6 @@ def main() -> int:
     # SIGINT while idle; PyQt6 then aborts once the exception escapes a slot.
     # The default handler makes Ctrl-C terminate immediately and quietly.
     signal.signal(signal.SIGINT, signal.SIG_DFL)
-
-    try:
-        receiver_found = wait_for_receiver()
-    except HeadsetError as exc:
-        print(f"Could not inspect the G733 receiver: {exc}", file=sys.stderr)
-        return 1
-    if not receiver_found:
-        print("G733 receiver did not appear within 30 seconds; exiting.", file=sys.stderr)
-        return 0
 
     app = QApplication(sys.argv)
     app.setApplicationName("G733 Battery")

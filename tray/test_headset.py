@@ -17,6 +17,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -235,6 +236,33 @@ class CommandLineTests(unittest.TestCase):
         ):
             headset.parse_arguments(["lights", "dim"])
         self.assertEqual(raised.exception.code, 2)
+
+
+class MainFailureTests(unittest.TestCase):
+    def test_a_missing_receiver_has_its_own_exit_status(self) -> None:
+        with (
+            mock.patch.object(
+                headset, "find_device", side_effect=headset.ReceiverNotFound("unplugged")
+            ),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            self.assertEqual(headset.main(["battery"]), headset.RECEIVER_UNAVAILABLE_EXIT)
+
+    def test_a_silent_headset_keeps_its_own_exit_status(self) -> None:
+        with (
+            mock.patch.object(
+                headset, "find_device", side_effect=headset.HeadsetUnavailable("off")
+            ),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            self.assertEqual(headset.main(["battery"]), headset.HEADSET_UNAVAILABLE_EXIT)
+
+    def test_a_short_reply_is_a_clean_headset_error(self) -> None:
+        with (
+            mock.patch.object(headset, "request", return_value=b""),
+            self.assertRaisesRegex(headset.HeadsetError, "short getFeature reply"),
+        ):
+            headset.feature_index(0, headset.ADC_MEASUREMENT_FEATURE, "ADC measurement")
 
 
 class FindDeviceTests(unittest.TestCase):
