@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 # Install the udev rule that lets one user, or the members of one group, read
-# the G733.
+# supported G733 or G535 headset.
 set -euo pipefail
 
 rule_path=/etc/udev/rules.d/99-logitech-g733-hidraw.rules
-match='SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0b1f"'
+# G733's HID++ receiver is 0b1f; G535's HID++ interface is 0ac4.
+matches=(
+  'SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0b1f"'
+  'SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0ac4"'
+)
 # SUDO_USER handles accidental execution via sudo.
 invoking_user="${SUDO_USER:-$USER}"
 
@@ -13,7 +17,7 @@ usage() {
 Usage: $0 [USER]
        $0 --group GROUP [USER...]
 
-Without --group, USER becomes the owner of the G733 node (MODE 0600).
+Without --group, USER becomes the owner of the headset node (MODE 0600).
 USER defaults to the account that runs this script ($invoking_user).
 
 With --group, GROUP owns the node (MODE 0660) and every member can use the
@@ -84,14 +88,20 @@ if [[ -n "$group" ]]; then
       added+=("$user")
     fi
   done
-  rule="$match, GROUP=\"$group\", MODE=\"0660\""
+  rules=()
+  for match in "${matches[@]}"; do
+    rules+=("$match, GROUP=\"$group\", MODE=\"0660\"")
+  done
   echo "Installing $rule_path for group $group"
 else
-  rule="$match, OWNER=\"${users[0]}\", MODE=\"0600\""
+  rules=()
+  for match in "${matches[@]}"; do
+    rules+=("$match, OWNER=\"${users[0]}\", MODE=\"0600\"")
+  done
   echo "Installing $rule_path for user ${users[0]}"
 fi
 
-printf '%s\n' "$rule" | sudo tee "$rule_path" >/dev/null
+printf '%s\n' "${rules[@]}" | sudo tee "$rule_path" >/dev/null
 sudo udevadm control --reload-rules
 
 # Re-apply the rule to a receiver that is already connected, so the usual case
@@ -101,7 +111,7 @@ sudo udevadm trigger --subsystem-match=hidraw --action=add
 sudo udevadm settle
 
 echo
-printf '%s\n' 'Rule installed and applied to any connected G733.'
+printf '%s\n' 'Rule installed and applied to any connected G733 or G535.'
 if [[ -n "$group" ]] && (( ${#added[@]} > 0 )); then
   printf 'Log out and back in as %s so the new group membership applies.\n' "${added[*]}"
 fi

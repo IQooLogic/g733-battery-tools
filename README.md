@@ -1,6 +1,6 @@
-# Logitech G733 HID access tools
+# Logitech G733/G535 HID access tools
 
-These scripts grant the local KDE desktop user access to the G733's HID
+These scripts grant the local KDE desktop user access to a G733 or G535 HID
 interface, read its battery, and include a KDE system-tray monitor in
 [`tray/`](tray/README.md). All talking to the headset is done by
 [`tray/g733_headset.py`](tray/g733_headset.py), which speaks Logitech's HID++
@@ -8,12 +8,12 @@ protocol directly and needs only Python 3.
 
 ## Prerequisites
 
-- The G733 USB receiver is connected and the headset is on.
+- The G733 or G535 USB receiver is connected and the headset is on.
 - Python 3.
 - `sudo` access is available to install the udev rule.
 
-The target device is deliberately restricted to Logitech vendor/product ID
-`046d:0b1f`, the receiver of this G733.
+The target devices are deliberately restricted to Logitech vendor/product IDs
+`046d:0b1f` (G733) and `046d:0ac4` (G535).
 
 ## Install the permission rule
 
@@ -23,7 +23,7 @@ From this directory:
 ./install-udev-rule.sh
 ```
 
-Enter your sudo password when prompted. The script writes:
+Enter your sudo password when prompted. The script writes two HID-interface rules to:
 
 ```text
 /etc/udev/rules.d/99-logitech-g733-hidraw.rules
@@ -51,7 +51,8 @@ new group membership applies. Run the installer again with other users to add
 them; it replaces the rule each time, and users already in the group are left
 as they are.
 
-Both forms are intentionally limited to the G733's `046d:0b1f` HID interface.
+Both forms are intentionally limited to the G733's `046d:0b1f` and G535's
+`046d:0ac4` HID interfaces.
 They are used instead of `TAG+="uaccess"` because some KDE/logind setups do not
 apply a user ACL to hidraw devices. `./install-udev-rule.sh --help` prints the
 usage.
@@ -63,14 +64,15 @@ events.
 
 ## Verify access and battery level
 
-First inspect the HID devices and the ACL on the G733 node:
+First inspect the HID devices and the ACL on the headset node:
 
 ```bash
 ./check-hidraw.sh
 ```
 
-For the detected G733, `getfacl` should show your username as `owner:` and
-`user::rw-`, or with `--group`, the group name as `group:` and `group::rw-`
+For the detected G733 or G535, `getfacl` should show your username as
+`owner:` and `user::rw-`, or with `--group`, the group name as `group:` and
+`group::rw-`
 (the exact node number can change after reconnecting). Then take one battery
 reading:
 
@@ -81,11 +83,12 @@ reading:
 Successful output is one JSON line:
 
 ```json
-{"voltage_mv": 3812, "flags": 1, "state": "discharging"}
+{"voltage_mv": 3812, "flags": 1, "state": "discharging", "model": "G535"}
 ```
 
-`state` is `discharging`, `charging` or `full`. The headset reports a voltage,
-not a percentage; the tray monitor estimates one from it, as described in
+`state` is `discharging`, `charging` or `full`; `model` is the detected
+headset. The headset reports a voltage, not a percentage; the tray monitor
+estimates one from it, as described in
 [How the battery is read](tray/README.md#how-the-battery-is-read).
 
 If it fails with `no permission to open /dev/hidrawN`, verify that the receiver
@@ -107,7 +110,7 @@ POLL_SECONDS=60 ./watch-battery.sh
 
 A failed reading prints its reason and the loop carries on.
 
-## Switch the lights
+## Switch the lights (G733 only)
 
 ```bash
 tray/g733_headset.py lights off
@@ -116,8 +119,8 @@ tray/g733_headset.py lights status
 ```
 
 `on` is a cyan breathing effect on both lighting zones. `status` prints whether
-the headset currently has its lights on or off. The tray monitor's menu does
-the same, and remembers the choice.
+the headset currently has its lights on or off. The G535 has no RGB lighting,
+so its tray menu does not show this action.
 
 ## Install and run the KDE tray monitor
 
@@ -129,9 +132,10 @@ cd tray
 ```
 
 The tray icon displays the estimated percentage, and turns blue with a
-lightning bolt while the headset is on the cable. Hover it for the percentage
+lightning bolt while the headset is on the cable. It identifies a G535 after
+the first reading. Hover it for the percentage
 and the battery voltage it came from. If Plasma hides it, open the system-tray
-settings and set **G733 Battery** to **Always shown**.
+settings and set **Logitech Headset Battery** to **Always shown**.
 
 To make it start automatically whenever you log in to KDE:
 

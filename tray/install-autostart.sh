@@ -10,8 +10,8 @@ mkdir -p -- "$autostart_dir"
 cat >"$desktop_file" <<EOF
 [Desktop Entry]
 Type=Application
-Name=G733 Battery
-Comment=Show Logitech G733 battery level in the system tray
+Name=Logitech Headset Battery
+Comment=Show Logitech G733 or G535 battery level in the system tray
 Exec="$script_dir/start.sh"
 Icon=audio-headset
 Terminal=false

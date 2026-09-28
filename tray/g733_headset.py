@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Talk to a Logitech G733 headset over HID++: read its battery, switch its lights.
+"""Talk to a supported Logitech headset over HID++: read its battery, switch its lights.
 
 Usage:
 
@@ -8,7 +8,7 @@ Usage:
 
 Each command prints one JSON object on success and exits with status 0:
 
-    {"voltage_mv": 3812, "flags": 1, "state": "discharging"}
+    {"voltage_mv": 3812, "flags": 1, "state": "discharging", "model": "G535"}
     {"lights": "off"}
 
 On failure it prints the reason to standard error. It exits with status 3
@@ -16,10 +16,11 @@ when the receiver cannot reach the headset, 4 when the receiver is absent, and
 1 for other failures. Only the standard library is used, so it starts quickly
 on every poll.
 
-The G733 has no battery-percentage feature. Its only battery source is
+The G733 and G535 have no battery-percentage feature. Their battery source is
 ADC_MEASUREMENT (HID++ 2.0 feature 0x1F20), which reports the cell voltage and
 a flags byte, and both are passed through with the state the flags encode. The
-lights are the two zones of COLOR_LED_EFFECTS (0x8070).
+G733 lights are the two zones of COLOR_LED_EFFECTS (0x8070); the G535 has no
+RGB lighting and rejects the lights command.
 """
 
 from __future__ import annotations
@@ -31,10 +32,26 @@ import os
 import select
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 VENDOR_ID = 0x046D
-PRODUCT_ID = 0x0B1F
+
+
+@dataclass(frozen=True)
+class DeviceProfile:
+    """The USB identity and capabilities of one supported headset."""
+
+    name: str
+    product_id: int
+    has_lights: bool
+
+
+# G733's receiver presents 0b1f on its HID++ interface.  G535 presents 0ac4
+# directly.  Both use HID++ 2.0's ADC_MEASUREMENT feature for the battery.
+G733 = DeviceProfile("G733", 0x0B1F, True)
+G535 = DeviceProfile("G535", 0x0AC4, False)
+SUPPORTED_DEVICES = {device.product_id: device for device in (G733, G535)}
 
 HIDPP_LONG_REPORT = 0x11
 HIDPP_LONG_LENGTH = 20
@@ -118,8 +135,8 @@ class ReceiverNotFound(HeadsetError):
     """The G733 receiver's HID++ interface is not connected yet."""
 
 
-def matches_g733(uevent: str) -> bool:
-    """Return whether a hidraw uevent describes the G733 receiver."""
+def device_profile_from_uevent(uevent: str) -> DeviceProfile | None:
+    """Return the supported headset profile described by a hidraw uevent."""
     for line in uevent.splitlines():
         key, _, value = line.partition("=")
         if key == "HID_ID":
@@ -131,16 +148,21 @@ def matches_g733(uevent: str) -> bool:
                 _bus, vendor, product = (int(part, 16) for part in parts)
             except ValueError:
                 return False
-            return (vendor, product) == (VENDOR_ID, PRODUCT_ID)
-    return False
+            return SUPPORTED_DEVICES.get(product) if vendor == VENDOR_ID else None
+    return None
 
 
-def find_device(sysfs: Path = SYSFS_HIDRAW) -> Path:
-    """Return the /dev node of the G733 interface that speaks HID++.
+def matches_g733(uevent: str) -> bool:
+    """Return whether a hidraw uevent describes the legacy G733 receiver."""
+    return device_profile_from_uevent(uevent) == G733
+
+
+def find_device_profile(sysfs: Path = SYSFS_HIDRAW) -> tuple[Path, DeviceProfile]:
+    """Return the HID++ node and profile for a supported Logitech headset.
 
     A hidraw directory can change while it is being scanned, especially during
-    USB removal.  A vanished unrelated entry must not hide a G733 that is
-    still present on a later entry.
+    USB removal. A vanished unrelated entry must not hide a supported headset
+    that is still present on a later entry.
     """
     for node in sorted(sysfs.glob("hidraw*")):
         try:
@@ -152,7 +174,8 @@ def find_device(sysfs: Path = SYSFS_HIDRAW) -> Path:
             # through its uevent read.  Keep scanning rather than failing the
             # G733 lookup because of that unrelated hotplug race.
             continue
-        if not matches_g733(uevent):
+        profile = device_profile_from_uevent(uevent)
+        if profile is None:
             continue
         try:
             descriptor = (node / "device" / "report_descriptor").read_bytes()
@@ -161,10 +184,16 @@ def find_device(sysfs: Path = SYSFS_HIDRAW) -> Path:
         except OSError as exc:
             raise HeadsetError(f"could not inspect {node}: {exc}") from exc
         if LONG_REPORT_DESCRIPTOR_ITEM in descriptor:
-            return Path("/dev") / node.name
+            return Path("/dev") / node.name, profile
+    products = ", ".join(f"{device.product_id:04x}" for device in SUPPORTED_DEVICES.values())
     raise ReceiverNotFound(
-        f"G733 receiver {VENDOR_ID:04x}:{PRODUCT_ID:04x} not found; is it plugged in?"
+        f"Logitech headset receiver {VENDOR_ID:04x}:{products} not found; is it plugged in?"
     )
+
+
+def find_device(sysfs: Path = SYSFS_HIDRAW) -> Path:
+    """Return only the HID++ path (kept for callers that do not need the model)."""
+    return find_device_profile(sysfs)[0]
 
 
 def disconnected_os_error(exc: OSError) -> bool:
@@ -313,7 +342,9 @@ def set_lights(fd: int, on: bool) -> dict[str, object]:
 
 
 def parse_arguments(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Talk to a Logitech G733 headset over HID++.")
+    parser = argparse.ArgumentParser(
+        description="Talk to a Logitech G733 or G535 headset over HID++."
+    )
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("battery", help="print one battery reading")
     lights = commands.add_parser("lights", help="switch the headset lights, or print their state")
@@ -324,7 +355,7 @@ def parse_arguments(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     arguments = parse_arguments(sys.argv[1:] if argv is None else argv)
     try:
-        path = find_device()
+        path, profile = find_device_profile()
         try:
             fd = os.open(path, os.O_RDWR)
         except PermissionError as exc:
@@ -332,12 +363,15 @@ def main(argv: list[str] | None = None) -> int:
         except OSError as exc:
             if disconnected_os_error(exc):
                 raise ReceiverNotFound(
-                    "G733 receiver disconnected while opening its HID interface"
+                    "Logitech headset receiver disconnected while opening its HID interface"
                 ) from exc
             raise HeadsetError(f"could not open {path}: {exc}") from exc
         try:
             if arguments.command == "battery":
                 result = read_battery(fd)
+                result["model"] = profile.name
+            elif not profile.has_lights:
+                raise HeadsetError(f"{profile.name} has no controllable RGB lights")
             elif arguments.state == "status":
                 result = read_lights(fd)
             else:
@@ -345,7 +379,7 @@ def main(argv: list[str] | None = None) -> int:
         except OSError as exc:
             if disconnected_os_error(exc):
                 raise ReceiverNotFound(
-                    "G733 receiver disconnected while reading its HID interface"
+                    "Logitech headset receiver disconnected while reading its HID interface"
                 ) from exc
             raise HeadsetError(f"could not talk to {path}: {exc}") from exc
         finally:

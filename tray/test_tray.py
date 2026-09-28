@@ -205,6 +205,21 @@ class BatteryStateTests(StubCommandMixin, unittest.TestCase):
         self.read_payload(reading_json("discharging", 3989))
         self.assertEqual(self.ran(), ["battery"])
 
+    def test_g535_is_named_and_does_not_offer_the_g733_lights_action(self) -> None:
+        payload = json.dumps(
+            {"voltage_mv": 3989, "flags": 1, "state": "discharging", "model": "G535"}
+        )
+        monitor = tray.G733Tray(3600, headset=(self.tool(battery=payload),), idle_aware=False)
+        self.addCleanup(monitor.poll_timer.stop)
+        monitor.refresh()
+        deadline = time.monotonic() + REQUEST_TIMEOUT_SECONDS
+        while monitor.in_flight and time.monotonic() < deadline:
+            APP.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 50)
+        self.assertFalse(monitor.in_flight)
+        self.assertEqual(monitor.status_action.text(), "G535 battery: 80% · 3989 mV")
+        self.assertFalse(monitor.lights_action.isVisible())
+        self.assertEqual(self.ran(), ["battery"])
+
     def test_a_tool_that_cannot_start_is_reported(self) -> None:
         text = read_once("/nonexistent/g733-headset")
         self.assertTrue(text.startswith("Could not start the headset tool:"))
@@ -292,6 +307,15 @@ class IdleAwarePollingTests(StubCommandMixin, unittest.TestCase):
         del props["alsa.components"]
         props["device.vendor.id"] = "0x046d"
         props["device.product.id"] = "0x0b1f"
+        link = {
+            "type": "PipeWire:Interface:Link",
+            "info": {"state": "active", "input-node-id": 55},
+        }
+        self.assertTrue(tray.g733_playback_is_active([sink, link]))
+
+    def test_pipewire_recognises_a_g535_sink(self) -> None:
+        sink = json.loads(json.dumps(self.SINK))
+        sink["info"]["props"]["alsa.components"] = "USB046d:0ac4"
         link = {
             "type": "PipeWire:Interface:Link",
             "info": {"state": "active", "input-node-id": 55},

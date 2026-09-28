@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""KDE system-tray battery monitor for a Logitech G733 headset."""
+"""KDE system-tray battery monitor for Logitech G733 and G535 headsets."""
 
 from __future__ import annotations
 
@@ -56,7 +56,14 @@ PIPEWIRE_DUMP_COMMAND = "pw-dump"
 # device.vendor.id/device.product.id, or together in alsa.components.
 G733_VENDOR_ID = "0x046d"
 G733_PRODUCT_ID = "0x0b1f"
-G733_ALSA_COMPONENT = f"usb{G733_VENDOR_ID[2:]}:{G733_PRODUCT_ID[2:]}"
+G535_PRODUCT_ID = "0x0ac4"
+# G535 has the same HID++ battery feature as the G733 but no RGB zones.
+MODEL_HAS_LIGHTS = {"G733": True, "G535": False}
+SUPPORTED_ALSA_COMPONENTS = {
+    f"usb{G733_VENDOR_ID[2:]}:{product_id[2:]}"
+    for product_id in (G733_PRODUCT_ID, G535_PRODUCT_ID)
+}
+SUPPORTED_PRODUCT_IDS = {G733_PRODUCT_ID, G535_PRODUCT_ID}
 # g733_headset.py distinguishes the two expected unavailable states from a
 # real tool/protocol failure, so the tray can wait for the right thing.
 HEADSET_UNAVAILABLE_EXIT = 3
@@ -172,12 +179,12 @@ def g733_playback_is_active(snapshot: object) -> bool:
             isinstance(vendor_id, str)
             and isinstance(product_id, str)
             and vendor_id.lower() == G733_VENDOR_ID
-            and product_id.lower() == G733_PRODUCT_ID
+            and product_id.lower() in SUPPORTED_PRODUCT_IDS
         )
         # WirePlumber commonly leaves the USB IDs out of a sink's properties
         # and puts them only in alsa.components, for example "USB046d:0b1f".
-        matches_alsa_component = (
-            isinstance(alsa_components, str) and G733_ALSA_COMPONENT in alsa_components.lower()
+        matches_alsa_component = isinstance(alsa_components, str) and any(
+            component in alsa_components.lower() for component in SUPPORTED_ALSA_COMPONENTS
         )
         if (
             props.get("media.class") == "Audio/Sink"
@@ -341,7 +348,11 @@ class G733Tray:
         self.low_battery_notified = False
         self.full_battery_notified = False
         self.last_error: str | None = None
-        self.status_text = "G733 battery: waiting for first reading"
+        # Older headset tools do not include a model in their JSON, so retain
+        # G733 as their compatible default until a reading identifies G535.
+        self.device_name = "G733"
+        self.supports_lights = True
+        self.status_text = f"{self.device_name} battery: waiting for first reading"
         # The last lights fault, kept until a lights request succeeds, so the
         # tooltip keeps explaining a failure whose notification has gone.
         self.lights_fault: str | None = None
@@ -528,7 +539,7 @@ class G733Tray:
             return
         self.in_flight = True
         self.refresh_action.setEnabled(False)
-        self.status_action.setText("G733: refreshing…")
+        self.status_action.setText(f"{self.device_name}: refreshing…")
         self.run_headset(self.process, "battery")
         self.timeout.start(REQUEST_TIMEOUT_MS)
 
@@ -579,8 +590,26 @@ class G733Tray:
         program, *base = self.headset
         process.start(program, [*base, *arguments])
 
+    def set_device_model(self, model: object) -> None:
+        """Apply model-specific capabilities reported by the headset tool."""
+        if not isinstance(model, str) or model not in MODEL_HAS_LIGHTS:
+            return
+        self.device_name = model
+        self.supports_lights = MODEL_HAS_LIGHTS[model]
+        # G535 has no RGB hardware. Do not run a status probe (or expose a
+        # menu action) that can only fail after every successful battery read.
+        if not self.supports_lights:
+            self.lights_restore_pending = False
+            self.lights_status_pending = False
+            self.lights_action.setVisible(False)
+            self.lights_status_action.setVisible(False)
+        else:
+            self.lights_action.setVisible(True)
+
     def toggle_lights(self) -> None:
         """Ask for the state the Lights item is not showing."""
+        if not self.supports_lights:
+            return
         # With no headset state yet, an unticked item still means a click asks
         # for lights on.
         self.set_lights(self.lights_on is not True)
@@ -589,7 +618,10 @@ class G733Tray:
         """Ask the headset to switch its RGB lighting on or off."""
         # One process serves the item, so a second press while a request runs
         # is ignored rather than queued behind it.
-        if self.lights_process.state() != QProcess.ProcessState.NotRunning:
+        if (
+            not self.supports_lights
+            or self.lights_process.state() != QProcess.ProcessState.NotRunning
+        ):
             return
         self.lights_request = on
         self.lights_operation = "set"
@@ -607,7 +639,7 @@ class G733Tray:
 
     def read_lights_state_if_pending(self) -> None:
         """Read the headset setting after it has answered a battery request."""
-        if not self.lights_status_pending:
+        if not self.supports_lights or not self.lights_status_pending:
             return
         if self.lights_process.state() != QProcess.ProcessState.NotRunning:
             return
@@ -781,7 +813,7 @@ class G733Tray:
             return
         if exit_code != 0:
             details = error_output or f"headset tool exited with {exit_code}"
-            self.show_error(f"G733 battery unavailable: {details}")
+            self.show_error(f"{self.device_name} battery unavailable: {details}")
             self.finish_request()
             return
         try:
@@ -793,18 +825,22 @@ class G733Tray:
             if not isinstance(voltage_mv, int) or voltage_mv <= 0:
                 raise ValueError(f"invalid voltage {voltage_mv!r}")
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            self.show_error(f"G733 battery unavailable: unreadable headset tool output: {exc}")
+            self.show_error(
+                f"{self.device_name} battery unavailable: unreadable headset tool output: {exc}"
+            )
             self.finish_request()
             return
+        self.set_device_model(reading.get("model"))
         self.show_reading(state, voltage_mv)
         self.finish_request()
         # The headset has just answered, so a remembered lights state that could
         # not be applied yet can be now. Otherwise read its setting so a headset
         # switched on after the monitor has the right menu tick.
-        if self.lights_restore_pending:
-            self.restore_lights_if_pending()
-        else:
-            self.read_lights_state_if_pending()
+        if self.supports_lights:
+            if self.lights_restore_pending:
+                self.restore_lights_if_pending()
+            else:
+                self.read_lights_state_if_pending()
 
     def process_error(self, error: QProcess.ProcessError) -> None:
         if self.quitting:
@@ -817,7 +853,7 @@ class G733Tray:
         if not self.in_flight:
             return
         self.process.kill()
-        self.show_error("G733 battery request timed out")
+        self.show_error(f"{self.device_name} battery request timed out")
         self.finish_request()
 
     def show_reading(self, state: str, voltage_mv: int) -> None:
@@ -828,7 +864,7 @@ class G733Tray:
             self.voltages.append(voltage_mv)
             smoothed_mv = round(statistics.median(self.voltages))
             level = estimate_percent(smoothed_mv)
-            text = f"G733 battery: {level}% · {smoothed_mv} mV"
+            text = f"{self.device_name} battery: {level}% · {smoothed_mv} mV"
             icon = icon_for(level)
         else:
             # A charger holds the voltage up, so neither the history nor a
@@ -836,10 +872,10 @@ class G733Tray:
             self.voltages.clear()
             level = None
             if state == STATE_FULL:
-                text = "G733 battery: fully charged"
+                text = f"{self.device_name} battery: fully charged"
                 icon = icon_for(100, is_charging=True)
             else:
-                text = "G733 battery: charging"
+                text = f"{self.device_name} battery: charging"
                 icon = icon_for(None, is_charging=True)
 
         if self.last_error is not None:
@@ -854,7 +890,9 @@ class G733Tray:
             self.low_battery_notified = False
         elif level <= LOW_BATTERY_PERCENT and not self.low_battery_notified:
             self.tray.showMessage(
-                "G733 battery low", f"Battery is at {level}%.", QSystemTrayIcon.MessageIcon.Warning
+                f"{self.device_name} battery low",
+                f"Battery is at {level}%.",
+                QSystemTrayIcon.MessageIcon.Warning
             )
             self.low_battery_notified = True
         elif level >= LOW_BATTERY_RESET_PERCENT:
@@ -863,7 +901,7 @@ class G733Tray:
         if state == STATE_FULL:
             if not self.full_battery_notified:
                 self.tray.showMessage(
-                    "G733 fully charged",
+                    f"{self.device_name} fully charged",
                     "The headset has finished charging and can come off the cable.",
                     QSystemTrayIcon.MessageIcon.Information,
                 )
@@ -881,7 +919,7 @@ class G733Tray:
         self.headset_unavailable = False
         self.polling_paused = False
         self.tray.setIcon(icon_for(None))
-        self.status_text = "G733 receiver is disconnected; waiting to reconnect"
+        self.status_text = f"{self.device_name} receiver is disconnected; waiting to reconnect"
         self.apply_status()
 
     def show_headset_unavailable(self) -> None:
@@ -894,7 +932,9 @@ class G733Tray:
         # proves the headset has completed its audio connection.
         self.polling_paused = True
         self.tray.setIcon(icon_for(None))
-        self.status_text = "G733 headset is off or out of range; waiting to reconnect"
+        self.status_text = (
+            f"{self.device_name} headset is off or out of range; waiting to reconnect"
+        )
         self.apply_status()
 
     def show_error(self, message: str) -> None:
@@ -918,7 +958,9 @@ class G733Tray:
         self.lights_status_action.setVisible(self.lights_fault is not None)
         lines = [self.status_text]
         if self.polling_paused:
-            lines.append("Battery polling paused while no audio is playing through the G733")
+            lines.append(
+                f"Battery polling paused while no audio is playing through the {self.device_name}"
+            )
         if self.lights_fault is not None:
             lines.append(self.lights_fault)
         self.tray.setToolTip("\n".join(lines))
@@ -958,7 +1000,7 @@ def main() -> int:
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
     app = QApplication(sys.argv)
-    app.setApplicationName("G733 Battery")
+    app.setApplicationName("Logitech Headset Battery")
     app.setQuitOnLastWindowClosed(False)
     if not QSystemTrayIcon.isSystemTrayAvailable():
         print("No system tray is available in this desktop session.", file=sys.stderr)

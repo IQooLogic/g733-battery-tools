@@ -1,11 +1,12 @@
-# G733 KDE tray monitor
+# G733/G535 KDE tray monitor
 
-A small PyQt6 application that displays the Logitech G733 battery in the KDE
+A small PyQt6 application that displays the Logitech G733 or G535 battery in the KDE
 Plasma system tray. Its icon contains the estimated percentage, coloured by
 charge level, and turns blue with a lightning bolt while the headset is on the
-cable. Its tooltip adds the battery voltage the estimate came from. Its context
-menu can also switch the headset lights on or off, and applies the last state
-you chose each time it starts, as soon as the headset answers.
+cable. Its tooltip adds the battery voltage the estimate came from. On the
+RGB-equipped G733, its context menu can also switch the lights on or off and
+applies the last state you chose each time it starts, as soon as the headset
+answers.
 
 Both the battery and the lights go through
 [`g733_headset.py`](g733_headset.py), which talks HID++ to the headset
@@ -20,7 +21,7 @@ The parent directory's udev setup must already work. Take one reading:
 ```
 
 It must print one JSON line, such as
-`{"voltage_mv": 3812, "flags": 1, "state": "discharging"}`, before you start
+`{"voltage_mv": 3812, "flags": 1, "state": "discharging", "model": "G535"}`, before you start
 this app. A permission error means the udev rule is not installed or not yet
 applied; see the [parent README](../README.md). PyQt6 is also required; on Arch
 it is packaged as `python-pyqt6`.
@@ -33,7 +34,7 @@ From this directory:
 ./start.sh
 ```
 
-The monitor stays running when the G733 USB receiver is not connected. It
+The monitor stays running when the G733 or G535 USB receiver is not connected. It
 shows a grey `?` with “receiver is disconnected” and checks sysfs every five
 seconds; this does not open the HID interface or contact a headset. After the
 receiver returns, the monitor waits for PipeWire to see audio before it sends
@@ -44,7 +45,8 @@ that is also normal.
 The tray icon starts as `?`, then immediately takes its first reading and
 updates. The number inside it is the estimated battery percentage; while the
 headset charges, the icon shows a bolt instead. Left-click or double-click the
-icon for an immediate refresh; right-click for Refresh now, Lights and Quit.
+icon for an immediate refresh; right-click for Refresh now and Quit. The G733
+menu also has Lights; the G535 does not.
 
 `./start.sh` runs the monitor in the foreground, so its terminal stays occupied
 until you use the tray's **Quit** action. Quit returns you to the shell without
@@ -56,7 +58,7 @@ shell reports exit status 130. To keep the shell prompt while testing, use:
 ```
 
 Plasma may initially hide new status items. Open the system-tray settings and
-set **G733 Battery** to **Always shown** if necessary.
+set **Logitech Headset Battery** to **Always shown** if necessary.
 
 ## Options
 
@@ -83,7 +85,7 @@ unknown argument.
 The monitor takes one battery reading immediately when it starts, so an
 autostarted tray icon does not remain at “waiting for first reading”. Later
 automatic battery reads run only while PipeWire reports an active playback
-link into the G733. When nothing is playing, the monitor stops sending HID++
+link into the connected G733 or G535. When nothing is playing, the monitor stops sending HID++
 requests, allowing the headset's own inactivity timer to power it off. Its
 tooltip says that polling is paused. It checks PipeWire again every five
 seconds, but that check does not open or contact the headset HID interface.
@@ -100,7 +102,7 @@ available when you explicitly want to wake it.
 This requires PipeWire's `pw-dump` command, which is normally installed with
 PipeWire. On a non-PipeWire desktop or if that command fails, the monitor
 falls back to its normal interval polling so battery monitoring continues.
-An active audio stream means an application is connected to the G733; it does
+An active audio stream means an application is connected to the headset; it does
 not prove that the stream contains non-silent sound.
 
 ## Tests
@@ -118,7 +120,7 @@ the battery states, the estimate and its smoothing, the notifications, the
 Lights item and the state it remembers, the icon colours and the charging
 bolt, the error reporting and the command line. `test_headset.py` runs the
 headset tool against a simulated headset and a simulated sysfs tree, covering
-device lookup, reply matching, the battery flags and the lights zones.
+device lookup, reply matching, the battery flags and the G733 lights zones.
 
 Linting and formatting use [ruff](https://docs.astral.sh/ruff/), configured in
 the repository's `pyproject.toml`. It is optional to run, and not needed to use
@@ -150,9 +152,9 @@ installing it. To stop automatic startup:
 
 ## How the battery is read
 
-The G733 does not report a percentage. Its only battery source is the HID++
-feature `ADC_MEASUREMENT` (`0x1F20`), which gives the cell voltage and a flags
-byte. `g733_headset.py battery` finds the headset's HID++ interface under
+Neither the G733 nor G535 reports a percentage. Their battery source is the
+HID++ feature `ADC_MEASUREMENT` (`0x1F20`), which gives the cell voltage and a
+flags byte. `g733_headset.py battery` finds the headset's HID++ interface under
 `/sys/class/hidraw`, asks the headset where that feature is, and prints one
 reading:
 
@@ -205,26 +207,27 @@ somewhat high.
 - Errors are also written to standard error, so an autostarted monitor can be
   diagnosed by redirecting its output to a log file. A repeated error is logged
   once, and recovery is logged when a reading succeeds again.
-- **Lights** is ticked while the lights are on. Clicking it switches them to
-  the other state by running `g733_headset.py lights on` or
+- **Lights** is shown only for the RGB-equipped G733. It is ticked while the
+  lights are on. Clicking it switches them to the other state by running
+  `g733_headset.py lights on` or
   `g733_headset.py lights off`. Each sets both lighting zones, either to a
   cyan breathing effect or to Disabled; the effects are looked up in the
   headset's own list rather than assumed. The item is disabled while a request
   runs, and the request uses its own process, so it does not cancel the
   current battery reading.
-- The state you choose is remembered. After the first successful battery
-  reading, the monitor also runs `g733_headset.py lights status` and the tick
-  shows the headset's actual setting. This corrects the tick when a headset is
+- On the G733, the state you choose is remembered. After the first successful
+  battery reading, the monitor also runs `g733_headset.py lights status` and
+  the tick shows the headset's actual setting. This corrects the tick when a headset is
   powered on after the monitor and starts with its lights on. The tick changes
   immediately after a successful lights request too.
-- The remembered state is applied again each time the monitor starts, once a
-  battery reading has succeeded, since that shows the headset is on. If the
-  headset is off when the monitor starts, as it often is for an autostarted
+- On the G733, the remembered state is applied again each time the monitor
+  starts, once a battery reading has succeeded, since that shows the headset is
+  on. If the headset is off when the monitor starts, as it often is for an autostarted
   monitor, the state waits and is applied after the first reading that
   succeeds once you switch the headset on. A restore that fails is tried again
   after the next successful reading. A click on **Lights** replaces a restore
   that is still waiting.
-- The remembered state is stored in:
+- The G733 remembered state is stored in:
 
   ```text
   ~/.config/g733-battery-tray/state.json
@@ -232,22 +235,22 @@ somewhat high.
 
   `XDG_CONFIG_HOME` is honoured. Delete the file to stop applying a state at
   startup. An unreadable or invalid file is logged and ignored, not repaired.
-- For about two seconds after a lights change the headset gave no usable
-  battery reading, when HeadsetControl switched the lights. The monitor therefore
-  holds the next reading back until that window has passed, and takes it then
+- On the G733, for about two seconds after a lights change the headset gave no
+  usable battery reading, when HeadsetControl switched the lights. The monitor
+  therefore holds the next reading back until that window has passed, and takes it then
   rather than waiting a full interval, so a lights change does not show a
   false `!`.
-- A failed lights request is logged, notified, and then kept in the tooltip and
-  under the Lights item until a lights request succeeds. It is deliberately not
-  put on the icon: the icon reports the battery, and that reading is still
+- On the G733, a failed lights request is logged, notified, and then kept in
+  the tooltip and under the Lights item until a lights request succeeds. It is
+  deliberately not put on the icon: the icon reports the battery, and that reading is still
   valid. A failed restore is not notified: you pressed nothing to cause it,
   and it is tried again after the next successful reading.
-- Each battery reading and lights request has a 15-second timeout. A
-  disconnected receiver is checked again every five seconds without HID
+- Each battery reading (and each G733 lights request) has a 15-second timeout.
+  A disconnected receiver is checked again every five seconds without HID
   access; an offline headset is retried only after PipeWire sees audio (or
   after an explicit refresh). Other failed battery readings are retried at the
-  next interval. A failed lights
-  request is not retried, so click **Lights** again. A failed startup status
-  check is retried after the next successful battery reading.
+  next interval. A failed G733 lights request is not retried, so click
+  **Lights** again. A failed startup status check is retried after the next
+  successful battery reading.
 
 [solaar]: https://github.com/pwr-Solaar/Solaar

@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import g733_headset as headset
 
 G733_UEVENT = "DRIVER=hid-generic\nHID_ID=0003:0000046D:00000B1F\nHID_NAME=Logitech G733\n"
+G535_UEVENT = "DRIVER=hid-generic\nHID_ID=0003:0000046D:00000AC4\nHID_NAME=Logitech G535\n"
 OTHER_UEVENT = "DRIVER=hid-generic\nHID_ID=0003:0000046D:0000C52B\nHID_NAME=Unifying\n"
 # A descriptor fragment with and without the HID++ long report.
 HIDPP_DESCRIPTOR = bytes([0x06, 0x43, 0xFF, 0x85, 0x11, 0x75, 0x08])
@@ -242,7 +243,7 @@ class MainFailureTests(unittest.TestCase):
     def test_a_missing_receiver_has_its_own_exit_status(self) -> None:
         with (
             mock.patch.object(
-                headset, "find_device", side_effect=headset.ReceiverNotFound("unplugged")
+                headset, "find_device_profile", side_effect=headset.ReceiverNotFound("unplugged")
             ),
             contextlib.redirect_stderr(io.StringIO()),
         ):
@@ -251,7 +252,7 @@ class MainFailureTests(unittest.TestCase):
     def test_a_silent_headset_keeps_its_own_exit_status(self) -> None:
         with (
             mock.patch.object(
-                headset, "find_device", side_effect=headset.HeadsetUnavailable("off")
+                headset, "find_device_profile", side_effect=headset.HeadsetUnavailable("off")
             ),
             contextlib.redirect_stderr(io.StringIO()),
         ):
@@ -285,8 +286,14 @@ class FindDeviceTests(unittest.TestCase):
 
     def test_a_missing_receiver_is_reported(self) -> None:
         self.node("hidraw2", OTHER_UEVENT, HIDPP_DESCRIPTOR)
-        with self.assertRaisesRegex(headset.HeadsetError, "046d:0b1f not found"):
+        with self.assertRaisesRegex(headset.HeadsetError, "046d:0b1f, 0ac4 not found"):
             headset.find_device(self.sysfs)
+
+    def test_the_g535_hidpp_interface_and_profile_are_found(self) -> None:
+        self.node("hidraw2", G535_UEVENT, HIDPP_DESCRIPTOR)
+        self.assertEqual(
+            headset.find_device_profile(self.sysfs), (Path("/dev/hidraw2"), headset.G535)
+        )
 
     def test_a_malformed_uevent_does_not_match(self) -> None:
         for uevent in ("HID_ID=0003:046D\n", "HID_ID=zz:yy:xx\n", "DRIVER=hid-generic\n"):
